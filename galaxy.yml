@@ -1,0 +1,17 @@
+namespace: haxney
+name: reolink
+version: 1.0.0
+readme: README.md
+description: Ansible collection for managing Reolink IP cameras and NVRs
+license:
+  - GPL-3.0-or-later
+tags:
+  - networking
+  - security
+  - camera
+  - reolink
+  - iot
+repository: https://github.com/haxney/reolink-api-ansible
+homepage: https://github.com/haxney/reolink-api-ansible
+issues: https://github.com/haxney/reolink-api-ansible/issues
+dependencies: {}
