@@ -17,7 +17,7 @@ description:
   - All parameters are optional; only provided parameters are changed.
   - Uses the C(reolink-aio) Python library (U(https://github.com/starkillerOG/reolink_aio)).
 author:
-  - Dan Haxney (@haxney)
+  - Dan Hackney (@haxney)
 requirements:
   - reolink-aio >= 0.9.0
   - Python >= 3.11

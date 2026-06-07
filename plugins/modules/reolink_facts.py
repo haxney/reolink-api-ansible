@@ -15,7 +15,7 @@ description:
     current settings, and per-channel state.
   - All returned data is read-only; this module never modifies the device.
 author:
-  - Dan Haxney (@haxney)
+  - Dan Hackney (@haxney)
 requirements:
   - reolink-aio >= 0.9.0
   - Python >= 3.11

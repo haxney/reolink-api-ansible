@@ -4,7 +4,7 @@ version: 1.0.0
 readme: README.md
 description: Ansible collection for managing Reolink IP cameras and NVRs
 authors:
-  - Dan Haxney <dan@haxney.org>
+  - Dan Hackney <dan@haxney.org>
 license:
   - GPL-3.0-or-later
 tags:

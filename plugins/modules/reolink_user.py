@@ -20,7 +20,7 @@ description:
   - B(Security note:) Always change the default admin password before exposing
     a camera to any network.
 author:
-  - Dan Haxney (@haxney)
+  - Dan Hackney (@haxney)
 requirements:
   - reolink-aio >= 0.9.0
   - Python >= 3.11
@@ -80,31 +80,6 @@ options:
     type: str
     choices: [present, absent]
     default: present
-examples:
-  - name: Change the admin password
-    haxney.reolink.reolink_user:
-      hostname: 192.168.1.100
-      username: admin
-      password: oldpassword
-      new_password: StrongNewPassword123!
-
-  - name: Create a viewer account
-    haxney.reolink.reolink_user:
-      hostname: 192.168.1.100
-      username: admin
-      password: adminpassword
-      target_username: viewer1
-      new_password: ViewerPass456
-      privilege: viewer
-      state: present
-
-  - name: Remove a user account
-    haxney.reolink.reolink_user:
-      hostname: 192.168.1.100
-      username: admin
-      password: adminpassword
-      target_username: viewer1
-      state: absent
 """
 
 EXAMPLES = r"""
