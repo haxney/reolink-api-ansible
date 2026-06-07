@@ -9,7 +9,7 @@ DOCUMENTATION = r"""
 ---
 module: reolink_facts
 short_description: Gather facts from a Reolink camera or NVR
-version_added: "1.0.0"
+version_added: "0.1.0"
 description:
   - Connects to a Reolink IP camera or NVR and returns detailed device information,
     current settings, and per-channel state.

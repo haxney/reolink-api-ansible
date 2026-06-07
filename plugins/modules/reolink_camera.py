@@ -9,7 +9,7 @@ DOCUMENTATION = r"""
 ---
 module: reolink_camera
 short_description: Configure Reolink IP cameras and NVRs
-version_added: "1.0.0"
+version_added: "0.1.0"
 description:
   - Manages configuration of Reolink IP cameras and NVR systems via the HTTP API.
   - Supports video stream settings, image adjustments, NTP configuration,

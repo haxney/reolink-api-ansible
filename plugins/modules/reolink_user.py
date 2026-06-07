@@ -9,7 +9,7 @@ DOCUMENTATION = r"""
 ---
 module: reolink_user
 short_description: Manage users and passwords on Reolink cameras
-version_added: "1.0.0"
+version_added: "0.1.0"
 description:
   - Creates, modifies, or removes user accounts on Reolink IP cameras and NVRs.
   - The most common use case is changing the C(admin) password after initial setup.
