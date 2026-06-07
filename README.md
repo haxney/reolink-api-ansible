@@ -25,10 +25,14 @@ Built on top of the officially-authorized
 - Python 3.11+ (on the Ansible controller)
 - [`reolink-aio`](https://pypi.org/project/reolink-aio/) ≥ 0.9.0
 
-Install the Python dependency on the controller:
+Install the Python dependencies on the controller:
 
 ```bash
-pip install reolink-aio
+pip install haxney-reolink          # installs reolink-aio and its deps
+# or, directly from source:
+pip install .
+# with dev/test extras:
+pip install ".[dev]"
 ```
 
 ---

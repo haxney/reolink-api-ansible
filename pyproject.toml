@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "haxney-reolink"
+version = "1.0.0"
+description = "Python dependencies for the haxney.reolink Ansible collection"
+readme = "README.md"
+license = { spdx = "GPL-3.0-or-later" }
+requires-python = ">=3.11"
+dependencies = [
+    "reolink-aio>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ansible-core>=2.14",
+    "pytest>=7.0",
+]
