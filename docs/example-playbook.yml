@@ -1,0 +1,124 @@
+---
+# Example playbook: Provision a fleet of Reolink cameras
+#
+# Usage:
+#   ansible-playbook docs/example-playbook.yml \
+#     -e old_admin_password=admin \
+#     -e new_admin_password=VaultedStrongPassword \
+#     -e ntp_server=192.168.1.1
+#
+# For production use, store passwords in Ansible Vault:
+#   ansible-vault encrypt_string 'MyPassword' --name 'admin_password'
+
+- name: Provision Reolink cameras
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    cameras:
+      - hostname: 192.168.10.101
+        name: "Front door"
+        channel: 0
+      - hostname: 192.168.10.102
+        name: "Back yard"
+        channel: 0
+      - hostname: 192.168.10.50
+        name: "NVR - channel 0"
+        channel: 0
+      - hostname: 192.168.10.50
+        name: "NVR - channel 1"
+        channel: 1
+
+    # Override via -e or Ansible Vault
+    old_admin_password: admin
+    new_admin_password: "{{ vault_admin_password }}"
+    ntp_server: pool.ntp.org
+    ntp_interval: 1440   # 24 hours
+    timezone_offset: -18000  # UTC-5 (US Eastern)
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. Change default admin password
+    # -------------------------------------------------------------------------
+    - name: Change admin password on all cameras
+      haxney.reolink.reolink_user:
+        hostname: "{{ item.hostname }}"
+        username: admin
+        password: "{{ old_admin_password }}"
+        new_password: "{{ new_admin_password }}"
+      loop: "{{ cameras | unique(attribute='hostname') }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      # Ignore failures if password was already changed (login will fail with old pw)
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # 2. Configure NTP and time settings (host-level, per unique device)
+    # -------------------------------------------------------------------------
+    - name: Configure NTP and timezone
+      haxney.reolink.reolink_camera:
+        hostname: "{{ item.hostname }}"
+        password: "{{ new_admin_password }}"
+        ntp:
+          enabled: true
+          server: "{{ ntp_server }}"
+          port: 123
+          interval: "{{ ntp_interval }}"
+          sync_now: true
+        time:
+          hours_24: true
+          timezone_offset: "{{ timezone_offset }}"
+      loop: "{{ cameras | unique(attribute='hostname') }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+
+    # -------------------------------------------------------------------------
+    # 3. Configure per-channel video and camera settings
+    # -------------------------------------------------------------------------
+    - name: Configure camera channels
+      haxney.reolink.reolink_camera:
+        hostname: "{{ item.hostname }}"
+        password: "{{ new_admin_password }}"
+        channel: "{{ item.channel }}"
+        video:
+          stream: main
+          encoding: h265
+          bitrate: 2048
+          frame_rate: 15
+        image:
+          brightness: 128
+          contrast: 128
+          saturation: 128
+        ir_lights: true
+        recording: true
+        audio: false
+        motion_detection: true
+        daynight: "Auto"
+        osd:
+          watermark: false
+      loop: "{{ cameras }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.hostname }}:{{ item.channel }})"
+
+    # -------------------------------------------------------------------------
+    # 4. Gather and display facts
+    # -------------------------------------------------------------------------
+    - name: Gather facts from all devices
+      haxney.reolink.reolink_facts:
+        hostname: "{{ item }}"
+        password: "{{ new_admin_password }}"
+      loop: "{{ cameras | map(attribute='hostname') | unique | list }}"
+      loop_control:
+        label: "{{ item }}"
+      register: camera_facts
+
+    - name: Display device summary
+      ansible.builtin.debug:
+        msg: >
+          {{ item.facts.model }}
+          ({{ item.invocation.module_args.hostname }})
+          — firmware {{ item.facts.firmware_version }}
+          — {{ item.facts.num_channels }} channel(s)
+      loop: "{{ camera_facts.results }}"
+      loop_control:
+        label: "{{ item.invocation.module_args.hostname }}"
