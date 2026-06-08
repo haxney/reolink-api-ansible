@@ -69,14 +69,16 @@ def run_async(coro):
 def connect(module):
     """Create and return a connected reolink_aio Host instance."""
     params = module.params
+    use_https = params["use_https"]
     kwargs = dict(
         host=params["hostname"],
         username=params["username"],
         password=params["password"],
+        use_https=use_https,
+        # Set port explicitly so login() skips the slow Baichuan port-detection
+        # path (_login_try_ports). Reolink cameras use 443 for HTTPS and 80 for HTTP.
+        port=params["port"] if params.get("port") is not None else (443 if use_https else 80),
     )
-    if params.get("port") is not None:
-        kwargs["port"] = params["port"]
-    kwargs["use_https"] = params["use_https"]
 
     async def _connect():
         host = Host(**kwargs)
