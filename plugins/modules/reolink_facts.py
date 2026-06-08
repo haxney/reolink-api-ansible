@@ -169,7 +169,7 @@ def main():
             username=dict(type="str", default="admin"),
             password=dict(type="str", required=True, no_log=True),
             port=dict(type="int"),
-            use_https=dict(type="bool"),
+            use_https=dict(type="bool", default=True),
             timeout=dict(type="int", default=30),
         ),
         supports_check_mode=True,
@@ -185,10 +185,10 @@ def main():
             module.warn(f"Could not retrieve channel states: {exc}")
 
         channels = []
-        for ch in range(host.num_channel):
+        for ch in range(host.num_channels):
             stream_sources = {}
             for stream in ("main", "sub"):
-                src = _safe_get(host.get_rtsp_stream_source if hasattr(host, "get_rtsp_stream_source") else lambda *a: None, ch, stream)
+                src = _safe_get(lambda ch=ch, stream=stream: run_async(host.get_rtsp_stream_source(ch, stream)), default=None)
                 if src:
                     stream_sources[stream] = src
 
@@ -197,19 +197,18 @@ def main():
                 "name": _safe_get(host.camera_name, ch, default=""),
                 "model": _safe_get(host.camera_model, ch, default=""),
                 "ir_lights": _safe_get(host.ir_enabled, ch, default=None),
-                "motion_detection": _safe_get(host.motion_detection_enabled, ch, default=None) if hasattr(host, "motion_detection_enabled") else None,
                 "recording": _safe_get(host.recording_enabled, ch, default=None) if hasattr(host, "recording_enabled") else None,
-                "audio": _safe_get(host.audio_enabled, ch, default=None) if hasattr(host, "audio_enabled") else None,
+                "audio": _safe_get(host.audio_record, ch, default=None),
                 "stream_sources": stream_sources,
             })
 
         facts = {
             "model": _safe_get(lambda: host.nvr_name, default=""),
             "is_nvr": host.is_nvr,
-            "num_channels": host.num_channel,
+            "num_channels": host.num_channels,
             "mac_address": _safe_get(lambda: host.mac_address, default=""),
-            "serial": _safe_get(lambda: host.serial, default=""),
-            "firmware_version": str(_safe_get(lambda: host.firmware_version, default="")),
+            "serial": _safe_get(lambda: host.serial(), default=""),
+            "firmware_version": str(_safe_get(lambda: host.sw_version, default="")),
             "hardware_version": str(_safe_get(lambda: host.hardware_version, default="")) if hasattr(host, "hardware_version") else "",
             "local_ip": _safe_get(lambda: host.local_ip, default="") if hasattr(host, "local_ip") else "",
             "rtmp_port": _safe_get(lambda: host.rtmp_port, default=None),

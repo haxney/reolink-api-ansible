@@ -66,12 +66,12 @@ options:
   privilege:
     description:
       - Privilege level for the user account.
-      - C(admin) has full access. C(guest) and C(viewer) have read-only access.
+      - C(admin) has full access. C(guest) has read-only access.
       - Only meaningful when C(state=present) and creating a new user, or
         when explicitly changing an existing user's privilege level.
     type: str
-    choices: [admin, guest, viewer]
-    default: viewer
+    choices: [admin, guest]
+    default: guest
   state:
     description:
       - C(present) ensures the user exists with the given password and/or privilege.
@@ -193,7 +193,7 @@ def main():
             timeout=dict(type="int", default=30),
             target_username=dict(type="str"),
             new_password=dict(type="str", no_log=True),
-            privilege=dict(type="str", choices=["admin", "guest", "viewer"], default="viewer"),
+            privilege=dict(type="str", choices=["admin", "guest"], default="guest"),
             state=dict(type="str", choices=["present", "absent"], default="present"),
         ),
         supports_check_mode=True,
@@ -235,7 +235,8 @@ def main():
                 # Modify existing user if anything changed
                 updates = {}
                 if new_password is not None:
-                    updates["password"] = new_password
+                    updates["oldPassword"] = module.params["password"]
+                    updates["newPassword"] = new_password
                 # Only update privilege when the user explicitly passes it as non-default
                 # AND it differs from existing. The API always requires userName.
                 current_level = existing.get("level", "")
@@ -246,9 +247,7 @@ def main():
                     changed = True
                     action = "modified"
                     if not check_mode:
-                        payload = {"userName": target_username}
-                        payload.update(updates)
-                        _send_user_cmd(module, host, "ModifyUser", payload)
+                        _send_user_cmd(module, host, "ModifyUser", {"userName": target_username, **updates})
 
         elif state == "absent":
             if existing is not None:

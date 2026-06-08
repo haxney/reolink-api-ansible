@@ -399,6 +399,19 @@ def _apply_bool_setting(module, host, channel, value, setter_name, label, check_
             module.fail_json(msg=f"Failed to set {label}: {exc}")
 
 
+def _apply_p2p(module, host, value, check_mode, changes):
+    """Disable or enable P2P (UID cloud connectivity) via raw API call."""
+    if value is None:
+        return
+    changes.append("p2p_enabled")
+    if not check_mode:
+        body = [{"cmd": "SetP2p", "action": 0, "param": {"P2p": {"enable": 1 if value else 0}}}]
+        try:
+            run_async(host.send_setting(body))
+        except Exception as exc:
+            module.fail_json(msg=f"Failed to set p2p_enabled: {exc}")
+
+
 def _apply_bool_setting_no_channel(module, host, value, setter_name, label, check_mode, changes):
     """Generic helper for boolean host-level settings."""
     if value is None:
@@ -450,7 +463,7 @@ def main():
             username=dict(type="str", default="admin"),
             password=dict(type="str", required=True, no_log=True),
             port=dict(type="int"),
-            use_https=dict(type="bool"),
+            use_https=dict(type="bool", default=True),
             timeout=dict(type="int", default=30),
             channel=dict(type="int", default=0),
             ntp=dict(type="dict", options=ntp_spec),
@@ -468,6 +481,7 @@ def main():
             push_notifications=dict(type="bool"),
             email_notifications=dict(type="bool"),
             ftp_upload=dict(type="bool"),
+            p2p_enabled=dict(type="bool"),
         ),
         supports_check_mode=True,
     )
@@ -500,6 +514,7 @@ def main():
         _apply_bool_setting(module, host, channel, module.params.get("push_notifications"), "set_push", "push_notifications", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("email_notifications"), "set_email", "email_notifications", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("ftp_upload"), "set_ftp", "ftp_upload", check_mode, changes)
+        _apply_p2p(module, host, module.params.get("p2p_enabled"), check_mode, changes)
 
         if module.params.get("daynight") is not None:
             changes.append("daynight")
@@ -518,11 +533,11 @@ def main():
                     module.fail_json(msg=f"Failed to set backlight mode: {exc}")
 
         camera_info = {
-            "model": host.camera_model(channel) if host.num_channel > 0 else host.nvr_name,
+            "model": host.camera_model(channel) if host.num_channels > 0 else host.nvr_name,
             "is_nvr": host.is_nvr,
-            "num_channels": host.num_channel,
+            "num_channels": host.num_channels,
             "mac_address": host.mac_address,
-            "firmware_version": str(host.firmware_version),
+            "firmware_version": str(host.sw_version),
         }
 
     finally:

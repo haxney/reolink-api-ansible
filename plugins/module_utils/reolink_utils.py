@@ -36,7 +36,7 @@ CONNECTION_ARGSPEC = dict(
     username=dict(type="str", default="admin"),
     password=dict(type="str", required=True, no_log=True),
     port=dict(type="int", default=None),
-    use_https=dict(type="bool", default=None),
+    use_https=dict(type="bool", default=True),
     timeout=dict(type="int", default=30),
 )
 
@@ -49,18 +49,21 @@ def check_reolink_import(module):
         )
 
 
+_loop = None
+
+
+def _get_loop():
+    """Return a reusable event loop, creating one if needed."""
+    global _loop
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
+    return _loop
+
+
 def run_async(coro):
     """Run a coroutine from synchronous Ansible module code."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop is None or loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    return loop.run_until_complete(coro)
+    return _get_loop().run_until_complete(coro)
 
 
 def connect(module):
@@ -73,12 +76,15 @@ def connect(module):
     )
     if params.get("port") is not None:
         kwargs["port"] = params["port"]
-    if params.get("use_https") is not None:
-        kwargs["use_https"] = params["use_https"]
+    kwargs["use_https"] = params["use_https"]
 
-    host = Host(**kwargs)
+    async def _connect():
+        host = Host(**kwargs)
+        await host.get_host_data()
+        return host
+
     try:
-        run_async(host.get_host_data())
+        return run_async(_connect())
     except CredentialsInvalidError as exc:
         module.fail_json(msg=f"Authentication failed for {params['hostname']}: {exc}")
     except LoginError as exc:
@@ -87,7 +93,6 @@ def connect(module):
         module.fail_json(msg=f"Failed to connect to {params['hostname']}: {exc}")
     except Exception as exc:
         module.fail_json(msg=f"Unexpected error connecting to {params['hostname']}: {exc}")
-    return host
 
 
 def disconnect(module, host):
