@@ -367,23 +367,53 @@ def _apply_image(module, host, channel, image_params, check_mode, changes):
 def _apply_osd(module, host, channel, osd_params, check_mode, changes):
     if osd_params is None:
         return
-    kwargs = {}
-    if osd_params.get("name_position") is not None:
-        kwargs["namePos"] = osd_params["name_position"]
-    if osd_params.get("date_position") is not None:
-        kwargs["datePos"] = osd_params["date_position"]
-    if osd_params.get("watermark") is not None:
-        kwargs["enableWaterMark"] = osd_params["watermark"]
-
-    if not kwargs:
+    if not any(osd_params.get(k) is not None for k in ("name", "name_position", "date_position", "watermark")):
         return
 
     changes.append("osd")
-    if not check_mode:
-        try:
-            run_async(host.set_osd(channel, **kwargs))
-        except Exception as exc:
-            module.fail_json(msg=f"Failed to set OSD settings: {exc}")
+    if check_mode:
+        return
+
+    # Fetch current OSD state so we can send a complete SetOsd body.
+    try:
+        run_async(host.get_state("GetOsd"))
+    except Exception as exc:
+        module.warn(f"Could not retrieve OSD settings: {exc}")
+        return
+
+    if channel not in host._osd_settings or not host._osd_settings[channel]:
+        module.warn(f"OSD not available on channel {channel}, skipping")
+        return
+
+    body = [{"cmd": "SetOsd", "action": 0, "param": host._osd_settings[channel]}]
+    osd = body[0]["param"]["Osd"]
+
+    if osd_params.get("name") is not None:
+        osd["osdChannel"]["name"] = osd_params["name"]
+
+    if osd_params.get("name_position") is not None:
+        pos = osd_params["name_position"]
+        if pos == "Off":
+            osd["osdChannel"]["enable"] = 0
+        else:
+            osd["osdChannel"]["enable"] = 1
+            osd["osdChannel"]["pos"] = pos
+
+    if osd_params.get("date_position") is not None:
+        pos = osd_params["date_position"]
+        if pos == "Off":
+            osd["osdTime"]["enable"] = 0
+        else:
+            osd["osdTime"]["enable"] = 1
+            osd["osdTime"]["pos"] = pos
+
+    if osd_params.get("watermark") is not None and "watermark" in osd:
+        osd["watermark"] = 1 if osd_params["watermark"] else 0
+
+    try:
+        run_async(host.send_setting(body))
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set OSD settings: {exc}")
 
 
 def _apply_bool_setting(module, host, channel, value, setter_name, label, check_mode, changes):
@@ -452,6 +482,7 @@ def main():
         sharpen=dict(type="int"),
     )
     osd_spec = dict(
+        name=dict(type="str"),
         name_position=dict(type="str"),
         date_position=dict(type="str"),
         watermark=dict(type="bool"),
@@ -514,7 +545,6 @@ def main():
         _apply_bool_setting(module, host, channel, module.params.get("push_notifications"), "set_push", "push_notifications", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("email_notifications"), "set_email", "email_notifications", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("ftp_upload"), "set_ftp", "ftp_upload", check_mode, changes)
-        _apply_p2p(module, host, module.params.get("p2p_enabled"), check_mode, changes)
 
         if module.params.get("daynight") is not None:
             changes.append("daynight")
@@ -531,6 +561,10 @@ def main():
                     run_async(host.set_backlight(channel, module.params["backlight"]))
                 except Exception as exc:
                     module.fail_json(msg=f"Failed to set backlight mode: {exc}")
+
+        # Apply P2P last — disabling it can restart the camera's HTTP service,
+        # which would break any API calls that follow.
+        _apply_p2p(module, host, module.params.get("p2p_enabled"), check_mode, changes)
 
         camera_info = {
             "model": host.camera_model(channel) if host.num_channels > 0 else host.nvr_name,
