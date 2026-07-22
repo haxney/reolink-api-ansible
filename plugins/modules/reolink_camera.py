@@ -170,6 +170,22 @@ options:
   ftp_upload:
     description: Enable or disable FTP upload on motion.
     type: bool
+  net_port:
+    description:
+      - Enablement of the device's network service ports.
+      - Only provided sub-keys are changed. Toggling a port invalidates the
+        current session; the module re-authenticates transparently.
+    type: dict
+    suboptions:
+      rtsp:
+        description: Enable or disable the RTSP streaming port (554). Required for Frigate.
+        type: bool
+      onvif:
+        description: Enable or disable the ONVIF port (8000).
+        type: bool
+      rtmp:
+        description: Enable or disable the RTMP port (1935).
+        type: bool
 """
 
 EXAMPLES = r"""
@@ -456,6 +472,45 @@ def _apply_p2p(module, host, value, check_mode, changes):
                 module.fail_json(msg=f"Failed to set p2p_enabled: {exc}")
 
 
+def _apply_net_port(module, host, net_port_params, check_mode, changes):
+    """Enable/disable the RTSP, ONVIF, and RTMP service ports (host-level)."""
+    if net_port_params is None:
+        return
+
+    desired = {port: net_port_params.get(port) for port in ("rtsp", "onvif", "rtmp")}
+    if all(v is None for v in desired.values()):
+        return
+
+    # Fetch current port state so we only toggle what actually differs.
+    try:
+        run_async(host.get_state("GetNetPort"))
+    except Exception as exc:
+        module.warn(f"Could not retrieve network port settings: {exc}")
+
+    current = {
+        "rtsp": host.rtsp_enabled,
+        "onvif": host.onvif_enabled,
+        "rtmp": host.rtmp_enabled,
+    }
+
+    kwargs = {}
+    for port, want in desired.items():
+        if want is not None and current.get(port) != want:
+            kwargs[f"enable_{port}"] = want
+
+    if not kwargs:
+        return
+
+    changes.append("net_port")
+    if not check_mode:
+        try:
+            # set_net_port() invalidates the session token; reolink-aio
+            # re-authenticates automatically on the next API call.
+            run_async(host.set_net_port(**kwargs))
+        except Exception as exc:
+            module.fail_json(msg=f"Failed to set network port settings: {exc}")
+
+
 def _apply_bool_setting_no_channel(module, host, value, setter_name, label, check_mode, changes):
     """Generic helper for boolean host-level settings."""
     if value is None:
@@ -501,6 +556,11 @@ def main():
         date_position=dict(type="str"),
         watermark=dict(type="bool"),
     )
+    net_port_spec = dict(
+        rtsp=dict(type="bool"),
+        onvif=dict(type="bool"),
+        rtmp=dict(type="bool"),
+    )
 
     module = AnsibleModule(
         argument_spec=dict(
@@ -520,6 +580,7 @@ def main():
             audio=dict(type="bool"),
             motion_detection=dict(type="bool"),
             osd=dict(type="dict", options=osd_spec),
+            net_port=dict(type="dict", options=net_port_spec),
             daynight=dict(type="str", choices=["Auto", "Color", "Black&White"]),
             backlight=dict(type="str", choices=["DynamicRangeControl", "BackLightControl", "Off"]),
             spotlight=dict(type="bool"),
@@ -575,6 +636,11 @@ def main():
                     run_async(host.set_backlight(channel, module.params["backlight"]))
                 except Exception as exc:
                     module.fail_json(msg=f"Failed to set backlight mode: {exc}")
+
+        # Enable/disable service ports (RTSP etc). Done before P2P because it
+        # only invalidates the session token (reolink-aio re-logins), whereas
+        # P2P can tear down the HTTP service entirely.
+        _apply_net_port(module, host, module.params.get("net_port"), check_mode, changes)
 
         # Apply P2P last — disabling it can restart the camera's HTTP service,
         # which would break any API calls that follow.
