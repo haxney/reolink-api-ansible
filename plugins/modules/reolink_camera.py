@@ -433,13 +433,27 @@ def _apply_p2p(module, host, value, check_mode, changes):
     """Disable or enable P2P (UID cloud connectivity) via raw API call."""
     if value is None:
         return
+    # Check current state to avoid unnecessary SetP2p, which restarts the camera's HTTP service.
+    try:
+        async def _get_p2p():
+            data = await host.send([{"cmd": "GetP2p", "action": 0, "param": {}}], expected_response_type="json")
+            return bool(data[0]["value"]["P2p"]["enable"])
+        current = run_async(_get_p2p())
+        if current == value:
+            return
+    except Exception:
+        pass  # If we can't check, proceed with setting
     changes.append("p2p_enabled")
     if not check_mode:
         body = [{"cmd": "SetP2p", "action": 0, "param": {"P2p": {"enable": 1 if value else 0}}}]
         try:
             run_async(host.send_setting(body))
         except Exception as exc:
-            module.fail_json(msg=f"Failed to set p2p_enabled: {exc}")
+            # A 502 response to SetP2p is expected: the camera restarts its HTTP
+            # service immediately after processing the command. The command was
+            # accepted; the wait_for task that follows will wait for recovery.
+            if "502" not in str(exc) and "Bad Gateway" not in str(exc):
+                module.fail_json(msg=f"Failed to set p2p_enabled: {exc}")
 
 
 def _apply_bool_setting_no_channel(module, host, value, setter_name, label, check_mode, changes):

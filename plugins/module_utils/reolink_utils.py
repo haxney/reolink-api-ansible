@@ -12,6 +12,7 @@ description:
 """
 
 import asyncio
+import types
 import traceback
 
 REOLINK_IMP_ERR = None
@@ -82,6 +83,18 @@ def connect(module):
 
     async def _connect():
         host = Host(**kwargs)
+        # When port and use_https are pre-configured, bypass the slow Baichuan
+        # recovery fallback. If login fails (e.g., 502 while camera HTTP service
+        # is restarting), raise immediately so Ansible retries quickly instead of
+        # waiting ~90s for Baichuan port discovery to time out.
+        # Note: this does NOT disable the initial Baichuan path (_login_try_ports)
+        # for cameras where port/use_https are not yet known (port=None case).
+        async def _fast_login_open_port(self):
+            if self._port is None or self._use_https is None:
+                await self._login_try_ports()
+                return
+            await self.login()
+        host._login_open_port = types.MethodType(_fast_login_open_port, host)
         await host.get_host_data()
         return host
 
