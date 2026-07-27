@@ -283,5 +283,74 @@ class TestApplyImage(unittest.TestCase):
         self.assertNotIn("saturation", image_calls[0][1])
 
 
+class TestApplyFlipMirror(unittest.TestCase):
+    def _make_host(self, isp):
+        host = MagicMock()
+        host._isp_settings = {0: isp}
+        host.get_state = AsyncMock()
+        host.send_setting = AsyncMock()
+        return host
+
+    def test_flip_and_mirror_sent_when_changed(self):
+        host = self._make_host({"channel": 0, "flip": 0, "mirror": 0})
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_flip_mirror(
+            module, host, channel=0, flip=True, mirror=True,
+            check_mode=False, changes=changes,
+        )
+        self.assertIn("flip_mirror", changes)
+        host.send_setting.assert_awaited_once()
+        body = host.send_setting.await_args.args[0]
+        self.assertEqual(body[0]["cmd"], "SetIsp")
+        self.assertEqual(body[0]["param"]["Isp"]["flip"], 1)
+        self.assertEqual(body[0]["param"]["Isp"]["mirror"], 1)
+
+    def test_idempotent_when_already_matching(self):
+        host = self._make_host({"channel": 0, "flip": 1, "mirror": 0})
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_flip_mirror(
+            module, host, channel=0, flip=True, mirror=False,
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, [])
+        host.send_setting.assert_not_awaited()
+
+    def test_check_mode_does_not_send(self):
+        host = self._make_host({"channel": 0, "flip": 0, "mirror": 0})
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_flip_mirror(
+            module, host, channel=0, flip=True, mirror=None,
+            check_mode=True, changes=changes,
+        )
+        self.assertIn("flip_mirror", changes)
+        host.send_setting.assert_not_awaited()
+
+    def test_unsupported_key_skipped(self):
+        host = self._make_host({"channel": 0, "flip": 0})  # no "mirror" key
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_flip_mirror(
+            module, host, channel=0, flip=None, mirror=True,
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, [])
+        module.warn.assert_called_once()
+        host.send_setting.assert_not_awaited()
+
+    def test_none_skipped(self):
+        host = self._make_host({"channel": 0, "flip": 0, "mirror": 0})
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_flip_mirror(
+            module, host, channel=0, flip=None, mirror=None,
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, [])
+        host.get_state.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -158,6 +158,18 @@ options:
       C(BackLightControl) enables BLC, C(Off) disables both.
     type: str
     choices: ["DynamicRangeControl", "BackLightControl", "Off"]
+  flip:
+    description:
+      - Flip the image vertically (rotate 180 degrees on the vertical axis).
+      - Applied via the ISP settings. Cameras that do not expose a flip setting
+        are skipped with a warning.
+    type: bool
+  mirror:
+    description:
+      - Mirror the image horizontally.
+      - Applied via the ISP settings. Cameras that do not expose a mirror setting
+        are skipped with a warning.
+    type: bool
   spotlight:
     description: Enable or disable the white spotlight LED (if present).
     type: bool
@@ -213,6 +225,13 @@ EXAMPLES = r"""
     password: secretpass
     channel: 3
     ir_lights: false
+
+- name: Flip and mirror a ceiling-mounted camera
+  haxney.reolink.reolink_camera:
+    hostname: 192.168.1.100
+    password: mypassword
+    flip: true
+    mirror: true
 """
 
 RETURN = r"""
@@ -432,6 +451,56 @@ def _apply_osd(module, host, channel, osd_params, check_mode, changes):
         module.fail_json(msg=f"Failed to set OSD settings: {exc}")
 
 
+def _apply_flip_mirror(module, host, channel, flip, mirror, check_mode, changes):
+    """Set image flip (vertical) and mirror (horizontal) via the ISP settings.
+
+    reolink-aio has no setter for these, so we edit the raw Isp param — the same
+    block set_daynight() mutates — and send a single SetIsp. Both are handled
+    together so we fetch and send once, avoiding two ISP restarts.
+    """
+    if flip is None and mirror is None:
+        return
+
+    # Fetch current ISP state so we can compare (idempotency) and send a
+    # complete SetIsp body.
+    try:
+        run_async(host.get_state(cmd="GetIsp", ch=channel))
+    except Exception as exc:
+        module.warn(f"Could not retrieve ISP settings: {exc}")
+        return
+
+    isp = host._isp_settings.get(channel)
+    if not isp:
+        module.warn(f"ISP not available on channel {channel}, skipping flip/mirror")
+        return
+
+    desired = {}
+    if flip is not None:
+        if "flip" not in isp:
+            module.warn(f"flip not supported on channel {channel}, skipping")
+        elif bool(isp["flip"]) != flip:
+            desired["flip"] = 1 if flip else 0
+    if mirror is not None:
+        if "mirror" not in isp:
+            module.warn(f"mirror not supported on channel {channel}, skipping")
+        elif bool(isp["mirror"]) != mirror:
+            desired["mirror"] = 1 if mirror else 0
+
+    if not desired:
+        return
+
+    changes.append("flip_mirror")
+    if check_mode:
+        return
+
+    isp.update(desired)
+    body = [{"cmd": "SetIsp", "action": 0, "param": {"Isp": isp}}]
+    try:
+        run_async(host.send_setting(body))
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set flip/mirror settings: {exc}")
+
+
 def _apply_bool_setting(module, host, channel, value, setter_name, label, check_mode, changes):
     """Generic helper for boolean channel settings."""
     if value is None:
@@ -583,6 +652,8 @@ def main():
             net_port=dict(type="dict", options=net_port_spec),
             daynight=dict(type="str", choices=["Auto", "Color", "Black&White"]),
             backlight=dict(type="str", choices=["DynamicRangeControl", "BackLightControl", "Off"]),
+            flip=dict(type="bool"),
+            mirror=dict(type="bool"),
             spotlight=dict(type="bool"),
             push_notifications=dict(type="bool"),
             email_notifications=dict(type="bool"),
@@ -636,6 +707,12 @@ def main():
                     run_async(host.set_backlight(channel, module.params["backlight"]))
                 except Exception as exc:
                     module.fail_json(msg=f"Failed to set backlight mode: {exc}")
+
+        _apply_flip_mirror(
+            module, host, channel,
+            module.params.get("flip"), module.params.get("mirror"),
+            check_mode, changes,
+        )
 
         # Enable/disable service ports (RTSP etc). Done before P2P because it
         # only invalidates the session token (reolink-aio re-logins), whereas
