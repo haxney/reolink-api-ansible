@@ -153,6 +153,36 @@ class TestRunAsync(unittest.TestCase):
         self.assertEqual(result, 42)
 
 
+class TestConnect(unittest.TestCase):
+    def test_host_constructed_inside_running_loop(self):
+        # reolink-aio's Host creates asyncio primitives in __init__, which
+        # fails with "no running event loop" (Python 3.14) if connect()
+        # builds it from synchronous code instead of inside a coroutine.
+        from reolink_aio.api import Host as FakeHost
+        import asyncio
+
+        class LoopCheckingHost(FakeHost):
+            def __init__(self, *args, **kwargs):
+                asyncio.get_running_loop()  # raises RuntimeError if none
+                super().__init__(*args, **kwargs)
+
+        module = MagicMock()
+        module.params = {
+            "hostname": "192.168.1.1",
+            "username": "admin",
+            "password": "pass",
+            "port": None,
+            "use_https": True,
+        }
+        module.fail_json.side_effect = AssertionError
+
+        with patch.object(reolink_utils, "Host", LoopCheckingHost):
+            host = reolink_utils.connect(module)
+
+        self.assertIsInstance(host, LoopCheckingHost)
+        module.fail_json.assert_not_called()
+
+
 class TestApplyNtp(unittest.TestCase):
     def _make_host(self):
         from reolink_aio.api import Host
