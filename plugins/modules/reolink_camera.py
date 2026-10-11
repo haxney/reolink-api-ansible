@@ -164,12 +164,14 @@ options:
       - Applied via the ISP settings. Cameras that do not expose a flip setting
         are skipped with a warning.
     type: bool
+    version_added: "0.2.0"
   mirror:
     description:
       - Mirror the image horizontally.
       - Applied via the ISP settings. Cameras that do not expose a mirror setting
         are skipped with a warning.
     type: bool
+    version_added: "0.2.0"
   spotlight:
     description: Enable or disable the white spotlight LED (if present).
     type: bool
@@ -188,6 +190,7 @@ options:
       - Only provided sub-keys are changed. Toggling a port invalidates the
         current session; the module re-authenticates transparently.
     type: dict
+    version_added: "0.2.0"
     suboptions:
       rtsp:
         description: Enable or disable the RTSP streaming port (554). Required for Frigate.
