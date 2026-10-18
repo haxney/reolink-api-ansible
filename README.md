@@ -270,7 +270,8 @@ check that settings took:
 
 - `time`: the clock the camera shows (`local_time`), the UTC offset it is
   applying now with DST included (`utc_offset`, seconds east of UTC), its error
-  against the controller's clock (`clock_error`), and its zone and DST settings
+  against the controller's clock (`clock_error`), its date format and 12/24-hour
+  setting, and its zone and DST settings
 - `outbound`: `p2p`, `auto_upgrade`, `upnp` and `ddns`, each true if on
 - `net_port`: whether `rtsp`, `onvif` and `rtmp` are enabled
 - per channel: `flip`, `mirror` and `push_notifications`

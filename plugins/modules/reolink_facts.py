@@ -157,6 +157,14 @@ facts:
             - Seconds the device clock is ahead of the clock of the host running
               the module (negative if behind), compared in UTC.
           type: int
+        date_format:
+          description: Date format of the on-screen clock, as reolink_camera's C(time.date_format).
+          type: str
+          version_added: "0.3.1"
+        hours_24:
+          description: Whether the on-screen clock is 24-hour.
+          type: bool
+          version_added: "0.3.1"
         timezone_offset:
           description: Configured standard-time offset, in Reolink's convention of seconds WEST of UTC.
           type: int
@@ -286,6 +294,8 @@ def _clock(host):
         "local_time": camera_now.replace(tzinfo=None).isoformat(),
         "utc_offset": int(camera_now.utcoffset().total_seconds()),
         "clock_error": round((camera_now - host_now).total_seconds()),
+        "date_format": settings["Time"]["timeFmt"],
+        "hours_24": settings["Time"]["hourFmt"] == 0,
         "timezone_offset": settings["Time"]["timeZone"],
         "dst": dst,
     }

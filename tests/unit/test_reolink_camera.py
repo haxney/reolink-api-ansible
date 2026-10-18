@@ -677,6 +677,8 @@ class TestFacts(unittest.TestCase):
         self.assertAlmostEqual(clock["clock_error"], 30, delta=2)
         self.assertEqual(clock["local_time"], camera_now.replace(tzinfo=None).isoformat())
         self.assertEqual(clock["timezone_offset"], 18000)
+        self.assertEqual(clock["date_format"], "DD/MM/YYYY")
+        self.assertIs(clock["hours_24"], False)
         self.assertTrue(clock["dst"]["enabled"])
         self.assertEqual(clock["dst"]["end"], {"month": 10, "week": 5, "weekday": 0, "hour": 2, "minute": 0, "second": 0})
 

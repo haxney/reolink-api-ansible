@@ -17,3 +17,12 @@ repository: https://github.com/haxney/reolink-api-ansible
 homepage: https://github.com/haxney/reolink-api-ansible
 issues: https://github.com/haxney/reolink-api-ansible/issues
 dependencies: {}
+
+# Local state that is not part of the collection. Before 0.3.1, builds
+# shipped the developer's .claude settings and the pytest cache.
+build_ignore:
+  - .claude
+  - .pytest_cache
+  - .venv
+  - .gitignore
+  - "*.tar.gz"
