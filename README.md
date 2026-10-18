@@ -244,8 +244,8 @@ time:
 |-----|------|-------------|
 | `stream` | str | `main`, `sub`, or `ext` |
 | `encoding` | str | `h264` or `h265` |
-| `bitrate` | int | Bitrate in kbps |
-| `frame_rate` | int | Frame rate in fps |
+| `bitrate` | int | Bitrate in kbps; must be one the camera offers (sub streams are typically 64-512) |
+| `frame_rate` | int | Frame rate in fps; must be one the camera offers |
 
 #### `image` sub-options
 
@@ -285,7 +285,9 @@ check that settings took:
 - `outbound`: `p2p`, `auto_upgrade`, `upnp` and `ddns`, each true if on
 - `net_port`: whether `rtsp`, `onvif` and `rtmp` are enabled
 - per channel: `flip`, `mirror`, `push_notifications`, `email_notifications`,
-  `ftp_upload`, and `webhooks` (how many are active)
+  `ftp_upload`, `webhooks` (how many are active), and `streams`: each of the
+  `main` and `sub` streams' `encoding`, `bitrate`, `frame_rate`, `width` and
+  `height`
 
 With `check_firmware: true` it also asks reolink.com for the newest firmware
 for the camera's model and hardware version, and reports it under `firmware`

@@ -173,10 +173,16 @@ options:
         type: str
         choices: [h264, h265]
       bitrate:
-        description: Video bitrate in kbps.
+        description:
+          - Video bitrate in kbps.
+          - Must be one the camera offers for the stream, where it publishes
+            the list (sub streams typically 64-512).
         type: int
       frame_rate:
-        description: Video frame rate in fps.
+        description:
+          - Video frame rate in fps.
+          - Must be one the camera offers for the stream, where it publishes
+            the list.
         type: int
   image:
     description: Image quality and appearance settings.
@@ -404,7 +410,6 @@ changes:
 """
 
 import traceback
-import xml.etree.ElementTree as ET
 
 from ansible.module_utils.basic import AnsibleModule
 
@@ -420,6 +425,7 @@ try:
         get_switch,
         push_enabled,
         switch_target,
+        stream_encoding,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -433,6 +439,7 @@ except ImportError:
         get_switch,
         push_enabled,
         switch_target,
+        stream_encoding,
     )
 
 
@@ -579,13 +586,6 @@ def _apply_time(module, host, time_params, check_mode, changes):
         module.fail_json(msg=f"Failed to set time settings: {exc}")
 
 
-def _baichuan_encoding(host, channel, stream):
-    """A stream's encoding read over Baichuan (command 56), the channel
-    set_encoding() writes through. HTTP GetEnc on the P330 has no vType."""
-    root = ET.fromstring(run_async(host.baichuan.send(cmd_id=56, channel=channel)))
-    return {"0": "h264", "1": "h265"}.get(root.find(f".//{stream}Stream/videoEncType").text)
-
-
 def _apply_video(module, host, channel, video_params, check_mode, changes):
     """Set encoding, bitrate and frame rate, sending only what differs.
 
@@ -595,11 +595,23 @@ def _apply_video(module, host, channel, video_params, check_mode, changes):
     if video_params is None:
         return
     stream = video_params.get("stream", "main")
+
+    # reolink-aio sends any bitrate or frame rate, and a camera may not reject
+    # one it cannot do (the sub stream tops out at 512 kbps on all three
+    # models). Refuse those here, wherever the camera publishes its lists.
+    for option, offered in (
+        ("bitrate", _read(lambda: host.bit_rate_list(channel, stream))),
+        ("frame_rate", _read(lambda: host.frame_rate_list(channel, stream))),
+    ):
+        value = video_params.get(option)
+        if value is not None and offered and value not in offered:
+            module.fail_json(msg=f"video.{option} {value} is not one the camera offers for its {stream} stream: {offered}")
+
     enc = _read(lambda: host._enc_settings[channel][f"{stream}Stream"]) or {}
     settings = (
         # (option, label, current value, setter)
         ("encoding", "video_encoding",
-         enc.get("vType") or (video_params.get("encoding") and _read(lambda: _baichuan_encoding(host, channel, stream))),
+         video_params.get("encoding") and _read(lambda: stream_encoding(host, channel, stream)),
          host.set_encoding),
         ("bitrate", "video_bitrate", enc.get("bitRate"), host.set_bit_rate),
         ("frame_rate", "video_frame_rate", enc.get("frameRate"), host.set_frame_rate),

@@ -312,6 +312,8 @@ class TestApplyVideo(unittest.TestCase):
     def _make_host(self, main_stream):
         host = MagicMock()
         host._enc_settings = {0: {"mainStream": main_stream}}
+        host.bit_rate_list = lambda ch, stream: []
+        host.frame_rate_list = lambda ch, stream: []
         host.set_encoding = AsyncMock()
         host.set_bit_rate = AsyncMock()
         host.set_frame_rate = AsyncMock()
@@ -344,6 +346,19 @@ class TestApplyVideo(unittest.TestCase):
         )
         self.assertEqual(changes, [])
         host.set_encoding.assert_not_awaited()
+
+    def test_bitrate_the_camera_does_not_offer_fails(self):
+        host = self._make_host({"vType": "h264", "bitRate": 256, "frameRate": 10})
+        host.bit_rate_list = lambda ch, stream: [64, 128, 160, 192, 256, 384, 512]
+        module = _failing_module()
+        with self.assertRaises(_FailJson):
+            reolink_camera._apply_video(
+                module, host, channel=0,
+                video_params={"stream": "sub", "bitrate": 1024},
+                check_mode=False, changes=[],
+            )
+        self.assertIn("not one the camera offers", module.fail_json.call_args.kwargs["msg"])
+        host.set_bit_rate.assert_not_awaited()
 
     def test_unknown_current_value_is_sent(self):
         host = self._make_host({})  # no vType etc.
@@ -806,6 +821,19 @@ class TestFacts(unittest.TestCase):
         host.supported = lambda ch, cap: ch is None
         host.email_enabled = lambda target: {None: False}[target]
         self.assertIs(reolink_facts._switch_state(host, 0, "email", host.email_enabled), False)
+
+    def test_streams(self):
+        host = MagicMock()
+        host._enc_settings = {0: {
+            "mainStream": {"bitRate": 4096, "frameRate": 15, "width": 3840, "height": 2160},
+            "subStream": {"vType": "h264", "bitRate": 512, "frameRate": 7, "width": 640, "height": 360},
+        }}
+        host.baichuan.send = AsyncMock(return_value=(
+            "<body><Compression><mainStream><videoEncType>1</videoEncType></mainStream></Compression></body>"))
+        streams = reolink_facts._streams(host, 0)
+        self.assertEqual(streams["main"], {"encoding": "h265", "bitrate": 4096, "frame_rate": 15, "width": 3840, "height": 2160})
+        self.assertEqual(streams["sub"]["encoding"], "h264")
+        self.assertEqual(streams["sub"]["bitrate"], 512)
 
     def test_active_webhooks(self):
         host = MagicMock()

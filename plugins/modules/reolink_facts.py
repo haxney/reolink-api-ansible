@@ -253,6 +253,28 @@ facts:
           description: Number of active webhooks (the camera calls each on events). 0 on a camera without webhooks; null if unknown.
           type: int
           version_added: "0.4.0"
+        streams:
+          description:
+            - Encoder settings of the C(main) and C(sub) streams, in the units of
+              reolink_camera's C(video) option, so a playbook can check them.
+          type: dict
+          version_added: "0.4.1"
+          contains:
+            encoding:
+              description: C(h264) or C(h265). Null if unknown.
+              type: str
+            bitrate:
+              description: Bitrate in kbps.
+              type: int
+            frame_rate:
+              description: Frame rate in fps.
+              type: int
+            width:
+              description: Width in pixels.
+              type: int
+            height:
+              description: Height in pixels.
+              type: int
         stream_sources:
           description: Available stream URLs (RTSP).
           type: dict
@@ -273,6 +295,7 @@ try:
         get_switch,
         push_enabled,
         switch_target,
+        stream_encoding,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -285,6 +308,7 @@ except ImportError:
         get_switch,
         push_enabled,
         switch_target,
+        stream_encoding,
     )
 
 
@@ -344,6 +368,23 @@ def _firmware(host):
         "download_url": latest.download_url,
         "release_notes": latest.release_notes,
     }
+
+
+def _streams(host, ch):
+    """Encoder settings of the main and sub streams; see RETURN."""
+    streams = {}
+    for stream in ("main", "sub"):
+        enc = host._enc_settings[ch].get(f"{stream}Stream")
+        if not enc:
+            continue
+        streams[stream] = {
+            "encoding": _safe_get(stream_encoding, host, ch, stream, default=None),
+            "bitrate": enc.get("bitRate"),
+            "frame_rate": enc.get("frameRate"),
+            "width": enc.get("width"),
+            "height": enc.get("height"),
+        }
+    return streams
 
 
 def _orientation(host, ch):
@@ -422,6 +463,7 @@ def main():
                 "email_notifications": _safe_get(_switch_state, host, ch, "email", host.email_enabled, default=None),
                 "ftp_upload": _safe_get(_switch_state, host, ch, "ftp", host.ftp_enabled, default=None),
                 "webhooks": _safe_get(_active_webhooks, host, ch, default=None),
+                "streams": _safe_get(_streams, host, ch, default={}),
                 "stream_sources": stream_sources,
             })
 

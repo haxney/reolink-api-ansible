@@ -14,6 +14,7 @@ description:
 import asyncio
 import types
 import traceback
+import xml.etree.ElementTree as ET
 
 REOLINK_IMP_ERR = None
 try:
@@ -200,3 +201,17 @@ def switch_target(host, channel, capability):
     if host.supported(None, capability):
         return None
     raise NotSupportedError(f"{capability} is not supported by this camera")
+
+
+def stream_encoding(host, channel, stream):
+    """A stream's encoding, "h264" or "h265".
+
+    HTTP GetEnc's vType where the camera reports one; otherwise Baichuan
+    command 56, the channel set_encoding() writes through. HTTP GetEnc on the
+    P330 has no vType.
+    """
+    vtype = host._enc_settings.get(channel, {}).get(f"{stream}Stream", {}).get("vType")
+    if vtype:
+        return vtype
+    root = ET.fromstring(run_async(host.baichuan.send(cmd_id=56, channel=channel)))
+    return {"0": "h264", "1": "h265"}[root.find(f".//{stream}Stream/videoEncType").text]
