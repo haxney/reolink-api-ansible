@@ -136,8 +136,13 @@ camera-provisioning playbook.
 | `hostname` | str | *required* | Camera/NVR IP address or hostname |
 | `username` | str | `admin` | Login username |
 | `password` | str | *required* | Login password |
-| `port` | int | `80` | HTTP port (auto-detected if omitted) |
-| `use_https` | bool | — | Force HTTPS |
+| `port` | int | 443 or 80 | Port, from `use_https` if omitted |
+
+The modules never let reolink-aio "recover" from a failed login by switching
+camera services on over the Baichuan protocol, which it otherwise does when the
+port or protocol is unknown or an HTTP login fails (HTTPS, RTSP, ONVIF, then
+RTMP). A failed login fails the task.
+| `use_https` | bool | `true` | HTTPS (port 443) rather than HTTP (port 80) |
 | `timeout` | int | `30` | Connection timeout (seconds) |
 
 ---
@@ -173,9 +178,14 @@ optional. Only supplied parameters are modified.
 | `upnp` | bool | Enable/disable UPnP port mapping on the router |
 | `ddns` | bool | Enable/disable dynamic DNS registration |
 
-`flip`, `mirror`, `time`, `push_notifications`, `auto_upgrade`, `upnp` and
-`ddns` only send a change when the camera differs, and fail the task if the
-camera lacks the setting or does not take it.
+Every setting is compared with the camera's current value and sent only if it
+differs, so `changed` means the camera was changed. The exceptions are
+`spotlight` (always sent) and `ntp.sync_now` (an action, never a change).
+`flip`, `mirror`, `time`, `push_notifications`, `email_notifications`,
+`ftp_upload`, `recording`, `auto_upgrade`, `upnp` and `ddns` also fail the task
+if the camera lacks the setting or does not take it. Push, email, FTP and
+recording switch per channel where the camera can, and device-wide where that
+is all it has.
 
 #### Stopping the camera phoning home
 
@@ -274,7 +284,13 @@ check that settings took:
   setting, and its zone and DST settings
 - `outbound`: `p2p`, `auto_upgrade`, `upnp` and `ddns`, each true if on
 - `net_port`: whether `rtsp`, `onvif` and `rtmp` are enabled
-- per channel: `flip`, `mirror` and `push_notifications`
+- per channel: `flip`, `mirror`, `push_notifications`, `email_notifications`,
+  `ftp_upload`, and `webhooks` (how many are active)
+
+With `check_firmware: true` it also asks reolink.com for the newest firmware
+for the camera's model and hardware version, and reports it under `firmware`
+(`current`, `latest`, `update_available`, `download_url`, `release_notes`). The
+request comes from the host running the module, not the camera.
 
 ---
 

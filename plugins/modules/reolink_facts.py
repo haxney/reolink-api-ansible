@@ -38,10 +38,22 @@ options:
   use_https:
     description: Use HTTPS instead of HTTP.
     type: bool
+    default: true
   timeout:
     description: Connection timeout in seconds.
     type: int
     default: 30
+  check_firmware:
+    description:
+      - Also ask Reolink's download site whether newer firmware exists, and
+        report it under C(firmware).
+      - The request goes from the host running the module to reolink.com, not
+        from the camera, so it works for cameras with no internet access.
+        reolink-aio does not verify reolink.com's TLS certificate, so treat the
+        answer as a prompt to look, and take firmware from reolink.com itself.
+    type: bool
+    default: false
+    version_added: "0.4.0"
 """
 
 EXAMPLES = r"""
@@ -138,6 +150,26 @@ facts:
         rtmp:
           description: RTMP server.
           type: bool
+    firmware:
+      description: Only with C(check_firmware). The running firmware and the newest Reolink offers for this model and hardware.
+      type: dict
+      version_added: "0.4.0"
+      contains:
+        current:
+          description: Running firmware version.
+          type: str
+        latest:
+          description: Newest firmware version on reolink.com.
+          type: str
+        update_available:
+          description: Whether C(latest) is newer than C(current).
+          type: bool
+        download_url:
+          description: Where reolink.com offers C(latest).
+          type: str
+        release_notes:
+          description: Reolink's notes for C(latest).
+          type: str
     time:
       description: The device clock and its time-zone settings. Null if they could not be read.
       type: dict
@@ -209,6 +241,18 @@ facts:
           description: Push notifications through Reolink's servers. Null if unknown.
           type: bool
           version_added: "0.3.0"
+        email_notifications:
+          description: Email alerts, per channel or device-wide as the camera has them. Null if unknown.
+          type: bool
+          version_added: "0.4.0"
+        ftp_upload:
+          description: FTP upload, per channel or device-wide as the camera has them. Null if unknown.
+          type: bool
+          version_added: "0.4.0"
+        webhooks:
+          description: Number of active webhooks (the camera calls each on events). 0 on a camera without webhooks; null if unknown.
+          type: int
+          version_added: "0.4.0"
         stream_sources:
           description: Available stream URLs (RTSP).
           type: dict
@@ -228,6 +272,7 @@ try:
         ISP_ORIENTATION_KEYS,
         get_switch,
         push_enabled,
+        switch_target,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -239,6 +284,7 @@ except ImportError:
         ISP_ORIENTATION_KEYS,
         get_switch,
         push_enabled,
+        switch_target,
     )
 
 
@@ -268,6 +314,36 @@ _OUTBOUND_SWITCHES = {
     "upnp": "Upnp",
     "ddns": "Ddns",
 }
+
+
+def _switch_state(host, ch, capability, read):
+    """read() at the channel, or device-wide where that is all the camera has."""
+    return read(switch_target(host, ch, capability))
+
+
+def _active_webhooks(host, ch):
+    """Number of webhooks the camera calls on events (indexEnable 1)."""
+    if not host.supported(ch, "webhook"):
+        return 0
+    run_async(host.get_state("GetWebHook", ch))
+    return sum(1 for hook in host._webhook_settings[ch]["WebHook"] if hook.get("indexEnable") == 1)
+
+
+def _firmware(host):
+    """Running and newest firmware, asking reolink.com from this host.
+
+    reolink-aio's public check_new_firmware() also sends CheckFirmware to the
+    camera, which makes the camera contact Reolink; the private
+    _check_reolink_firmware() is the reolink.com half alone.
+    """
+    latest = run_async(host._check_reolink_firmware(None))
+    return {
+        "current": str(host.sw_version),
+        "latest": latest.version_string,
+        "update_available": latest > host.sw_version_object,
+        "download_url": latest.download_url,
+        "release_notes": latest.release_notes,
+    }
 
 
 def _orientation(host, ch):
@@ -310,6 +386,7 @@ def main():
             port=dict(type="int"),
             use_https=dict(type="bool", default=True),
             timeout=dict(type="int", default=30),
+            check_firmware=dict(type="bool", default=False),
         ),
         supports_check_mode=True,
     )
@@ -342,6 +419,9 @@ def main():
                 "flip": orientation["flip"],
                 "mirror": orientation["mirror"],
                 "push_notifications": _safe_get(push_enabled, host, ch, default=None),
+                "email_notifications": _safe_get(_switch_state, host, ch, "email", host.email_enabled, default=None),
+                "ftp_upload": _safe_get(_switch_state, host, ch, "ftp", host.ftp_enabled, default=None),
+                "webhooks": _safe_get(_active_webhooks, host, ch, default=None),
                 "stream_sources": stream_sources,
             })
 
@@ -366,6 +446,11 @@ def main():
             "time": _safe_get(_clock, host, default=None),
             "channels": channels,
         }
+        if module.params["check_firmware"]:
+            try:
+                facts["firmware"] = _firmware(host)
+            except Exception as exc:
+                module.fail_json(msg=f"Firmware check against reolink.com failed: {exc}")
 
     finally:
         disconnect(module, host)

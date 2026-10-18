@@ -67,34 +67,50 @@ def run_async(coro):
     return _get_loop().run_until_complete(coro)
 
 
+def _endpoint(params):
+    """(use_https, port) for params, never None.
+
+    reolink-aio "recovers" from a failed HTTP(s) login by switching services
+    on over the Baichuan protocol: HTTPS, RTSP and ONVIF in _login_try_ports(),
+    which login() runs whenever the port or protocol is unknown, and RTMP in
+    _login_open_port(). A module must not change what it was not asked to, so
+    both are always set, and connect() replaces _login_open_port() with a
+    plain login. HTTPS on 443 unless told otherwise.
+    """
+    use_https = params.get("use_https")
+    if use_https is None:
+        use_https = True
+    port = params.get("port")
+    if port is None:
+        port = 443 if use_https else 80
+    return use_https, port
+
+
+def _login_without_opening_ports(self):
+    """Stand-in for Host._login_open_port: log in, and let a failure fail.
+
+    Also fast: a failed login (a 502 while the camera's HTTP service
+    restarts, say) raises at once, so Ansible retries instead of waiting
+    ~90 s for Baichuan port discovery to time out.
+    """
+    return self.login()
+
+
 def connect(module):
     """Create and return a connected reolink_aio Host instance."""
     params = module.params
-    use_https = params["use_https"]
+    use_https, port = _endpoint(params)
     kwargs = dict(
         host=params["hostname"],
         username=params["username"],
         password=params["password"],
         use_https=use_https,
-        # Set port explicitly so login() skips the slow Baichuan port-detection
-        # path (_login_try_ports). Reolink cameras use 443 for HTTPS and 80 for HTTP.
-        port=params["port"] if params.get("port") is not None else (443 if use_https else 80),
+        port=port,
     )
 
     async def _connect():
         host = Host(**kwargs)
-        # When port and use_https are pre-configured, bypass the slow Baichuan
-        # recovery fallback. If login fails (e.g., 502 while camera HTTP service
-        # is restarting), raise immediately so Ansible retries quickly instead of
-        # waiting ~90s for Baichuan port discovery to time out.
-        # Note: this does NOT disable the initial Baichuan path (_login_try_ports)
-        # for cameras where port/use_https are not yet known (port=None case).
-        async def _fast_login_open_port(self):
-            if self._port is None or self._use_https is None:
-                await self._login_try_ports()
-                return
-            await self.login()
-        host._login_open_port = types.MethodType(_fast_login_open_port, host)
+        host._login_open_port = types.MethodType(_login_without_opening_ports, host)
         await host.get_host_data()
         return host
 
@@ -143,3 +159,44 @@ def push_enabled(host, channel):
     if "enable" in settings:  # device-wide switch (V20)
         return settings["enable"] == 1
     return settings["schedule"]["enable"] == 1  # per-channel switch (legacy)
+
+
+def credentials_work(params, username, password):
+    """Whether username/password can log in to the device in params.
+
+    Passwords cannot be read back, so this is how a module tells whether one
+    already has the wanted value. A wrong password costs one failed login,
+    which counts towards the device's lockout. Calls login() alone, with the
+    port and protocol set, which never takes reolink-aio's port-opening
+    recovery path (see connect()).
+    """
+    use_https, port = _endpoint(params)
+
+    async def _try():
+        probe = Host(host=params["hostname"], username=username, password=password, use_https=use_https, port=port)
+        try:
+            await probe.login()
+            return True
+        except CredentialsInvalidError:
+            return False
+        finally:
+            try:
+                await probe.logout()
+            except Exception:
+                pass
+
+    return run_async(_try())
+
+
+def switch_target(host, channel, capability):
+    """Where to read or switch capability: the channel, or None for the
+    device-wide switch on cameras that only have that one.
+
+    Email, FTP and recording come in both shapes, and reolink-aio's per-channel
+    calls raise (or read the wrong key) on a device-wide-only camera.
+    """
+    if host.supported(channel, capability):
+        return channel
+    if host.supported(None, capability):
+        return None
+    raise NotSupportedError(f"{capability} is not supported by this camera")

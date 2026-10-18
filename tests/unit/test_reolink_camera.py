@@ -145,6 +145,16 @@ from plugins.modules import reolink_camera  # noqa: E402
 from plugins.modules import reolink_facts  # noqa: E402
 
 
+class _FailJson(Exception):
+    """Stands in for AnsibleModule.fail_json, which never returns."""
+
+
+def _failing_module():
+    module = MagicMock()
+    module.fail_json.side_effect = _FailJson
+    return module
+
+
 class TestRunAsync(unittest.TestCase):
     def test_runs_coroutine(self):
         async def _coro():
@@ -184,144 +194,289 @@ class TestConnect(unittest.TestCase):
         module.fail_json.assert_not_called()
 
 
+class TestEndpoint(unittest.TestCase):
+    """reolink-aio switches services on when the port or protocol is unknown
+    (_login_try_ports): HTTPS, RTSP and ONVIF. Neither may ever be None."""
+
+    def test_unset_means_https_on_443(self):
+        self.assertEqual(reolink_utils._endpoint({"use_https": None, "port": None}), (True, 443))
+
+    def test_http_on_80(self):
+        self.assertEqual(reolink_utils._endpoint({"use_https": False, "port": None}), (False, 80))
+
+    def test_explicit_port_kept(self):
+        self.assertEqual(reolink_utils._endpoint({"use_https": True, "port": 8443}), (True, 8443))
+
+    def test_connect_never_opens_ports(self):
+        from reolink_aio.api import Host as FakeHost
+
+        class GuardedHost(FakeHost):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.init_kwargs = kwargs
+                self.logins = 0
+
+            async def login(self):
+                self.logins += 1
+
+            async def _login_try_ports(self):
+                raise AssertionError("_login_try_ports switches ports on")
+
+            async def get_host_data(self):
+                await self._login_open_port()
+
+        module = MagicMock()
+        module.params = {"hostname": "192.168.1.1", "username": "admin", "password": "pass", "port": None, "use_https": None}
+        module.fail_json.side_effect = AssertionError
+        with patch.object(reolink_utils, "Host", GuardedHost):
+            host = reolink_utils.connect(module)
+        self.assertEqual((host.init_kwargs["use_https"], host.init_kwargs["port"]), (True, 443))
+        self.assertEqual(host.logins, 1)
+
+
+class TestCredentialsWork(unittest.TestCase):
+    def _run(self, login_error):
+        from reolink_aio.api import Host as FakeHost
+
+        class LoginHost(FakeHost):
+            async def login(self):
+                if login_error:
+                    raise login_error
+
+        with patch.object(reolink_utils, "Host", LoginHost):
+            return reolink_utils.credentials_work({"hostname": "h", "use_https": True, "port": None}, "viewer", "pw")
+
+    def test_true_when_login_works(self):
+        self.assertIs(self._run(None), True)
+
+    def test_false_on_bad_credentials(self):
+        from reolink_aio.exceptions import CredentialsInvalidError
+        self.assertIs(self._run(CredentialsInvalidError("password wrong")), False)
+
+    def test_other_errors_raise(self):
+        from reolink_aio.exceptions import LoginError
+        with self.assertRaises(LoginError):
+            self._run(LoginError("502"))
+
+
 class TestApplyNtp(unittest.TestCase):
-    def _make_host(self):
-        from reolink_aio.api import Host
-        return Host("192.168.1.1", "admin", "pass")
+    def _make_host(self, ntp):
+        host = MagicMock()
+        host._ntp_settings = {"Ntp": ntp}
+        host.get_state = AsyncMock()
+        host.set_ntp = AsyncMock()
+        host.sync_ntp = AsyncMock()
+        return host
 
-    def test_ntp_kwargs_forwarded(self):
-        host = self._make_host()
-        called_with = {}
-
-        async def fake_set_ntp(**kwargs):
-            called_with.update(kwargs)
-
-        host.set_ntp = fake_set_ntp
-
-        module = MagicMock()
+    def test_only_differing_fields_sent(self):
+        host = self._make_host({"enable": 1, "server": "pool.ntp.org", "port": 123, "interval": 1440})
         changes = []
         reolink_camera._apply_ntp(
-            module,
-            host,
-            {"enabled": True, "server": "pool.ntp.org", "port": 123, "interval": 1440, "sync_now": False},
-            check_mode=False,
-            changes=changes,
+            _failing_module(), host,
+            {"enabled": True, "server": "172.16.4.40", "port": 123, "interval": 1440, "sync_now": False},
+            check_mode=False, changes=changes,
         )
-        self.assertIn("ntp", changes)
-        self.assertEqual(called_with["enable"], True)
-        self.assertEqual(called_with["server"], "pool.ntp.org")
-        self.assertEqual(called_with["port"], 123)
-        self.assertEqual(called_with["interval"], 1440)
+        self.assertEqual(changes, ["ntp"])
+        host.set_ntp.assert_awaited_once_with(server="172.16.4.40")
 
-    def test_ntp_check_mode_does_not_call_api(self):
-        host = self._make_host()
-        api_called = []
-
-        async def fake_set_ntp(**kwargs):
-            api_called.append(kwargs)
-
-        host.set_ntp = fake_set_ntp
-
-        module = MagicMock()
+    def test_idempotent_and_sync_now_is_not_a_change(self):
+        host = self._make_host({"enable": 1, "server": "172.16.4.40", "port": 123, "interval": 1440})
         changes = []
         reolink_camera._apply_ntp(
-            module,
-            host,
-            {"server": "pool.ntp.org"},
-            check_mode=True,
-            changes=changes,
+            _failing_module(), host,
+            {"enabled": True, "server": "172.16.4.40", "port": 123, "interval": 1440, "sync_now": True},
+            check_mode=False, changes=changes,
         )
-        self.assertIn("ntp", changes)
-        self.assertEqual(api_called, [])
+        self.assertEqual(changes, [])
+        host.set_ntp.assert_not_awaited()
+        host.sync_ntp.assert_awaited_once()
 
-    def test_ntp_none_skipped(self):
-        host = self._make_host()
-        module = MagicMock()
+    def test_check_mode_does_not_call_api(self):
+        host = self._make_host({"enable": 0, "server": "pool.ntp.org", "port": 123, "interval": 1440})
         changes = []
-        reolink_camera._apply_ntp(module, host, None, check_mode=False, changes=changes)
+        reolink_camera._apply_ntp(
+            _failing_module(), host, {"enabled": True, "sync_now": True}, check_mode=True, changes=changes,
+        )
+        self.assertEqual(changes, ["ntp"])
+        host.set_ntp.assert_not_awaited()
+        host.sync_ntp.assert_not_awaited()
+
+    def test_none_skipped(self):
+        host = self._make_host({})
+        changes = []
+        reolink_camera._apply_ntp(_failing_module(), host, None, check_mode=False, changes=changes)
         self.assertEqual(changes, [])
 
 
 class TestApplyVideo(unittest.TestCase):
-    def _make_host(self):
-        from reolink_aio.api import Host
-        return Host("192.168.1.1", "admin", "pass")
+    def _make_host(self, main_stream):
+        host = MagicMock()
+        host._enc_settings = {0: {"mainStream": main_stream}}
+        host.set_encoding = AsyncMock()
+        host.set_bit_rate = AsyncMock()
+        host.set_frame_rate = AsyncMock()
+        return host
 
-    def test_video_settings_recorded(self):
-        host = self._make_host()
-        encoding_calls = []
-        bitrate_calls = []
-        fps_calls = []
-
-        async def fake_encoding(ch, val, stream=None):
-            encoding_calls.append((ch, val, stream))
-
-        async def fake_bitrate(ch, val, stream=None):
-            bitrate_calls.append((ch, val, stream))
-
-        async def fake_fps(ch, val, stream=None):
-            fps_calls.append((ch, val, stream))
-
-        host.set_encoding = fake_encoding
-        host.set_bit_rate = fake_bitrate
-        host.set_frame_rate = fake_fps
-
-        module = MagicMock()
+    def test_only_differing_settings_sent(self):
+        host = self._make_host({"vType": "h265", "bitRate": 4096, "frameRate": 15})
         changes = []
         reolink_camera._apply_video(
-            module,
-            host,
-            channel=0,
-            video_params={"stream": "main", "encoding": "h265", "bitrate": 2048, "frame_rate": 15},
-            check_mode=False,
-            changes=changes,
+            _failing_module(), host, channel=0,
+            video_params={"stream": "main", "encoding": "h265", "bitrate": 8192, "frame_rate": 15},
+            check_mode=False, changes=changes,
         )
-        self.assertIn("video_encoding", changes)
-        self.assertIn("video_bitrate", changes)
-        self.assertIn("video_frame_rate", changes)
-        self.assertEqual(encoding_calls[0], (0, "h265", "main"))
-        self.assertEqual(bitrate_calls[0], (0, 2048, "main"))
-        self.assertEqual(fps_calls[0], (0, 15, "main"))
+        self.assertEqual(changes, ["video_bitrate"])
+        host.set_encoding.assert_not_awaited()
+        host.set_bit_rate.assert_awaited_once_with(0, 8192, "main")
+        host.set_frame_rate.assert_not_awaited()
+
+    def test_encoding_read_over_baichuan_when_http_lacks_it(self):
+        # P330: HTTP GetEnc has no vType; Baichuan command 56 has videoEncType.
+        host = self._make_host({"bitRate": 4096, "frameRate": 15})
+        host.baichuan.send = AsyncMock(return_value=(
+            "<body><Compression><mainStream><videoEncType>1</videoEncType></mainStream>"
+            "<subStream><videoEncType>0</videoEncType></subStream></Compression></body>"))
+        changes = []
+        reolink_camera._apply_video(
+            _failing_module(), host, channel=0,
+            video_params={"stream": "main", "encoding": "h265", "bitrate": 4096, "frame_rate": 15},
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, [])
+        host.set_encoding.assert_not_awaited()
+
+    def test_unknown_current_value_is_sent(self):
+        host = self._make_host({})  # no vType etc.
+        host.baichuan.send = AsyncMock(side_effect=Exception("no Baichuan"))
+        changes = []
+        reolink_camera._apply_video(
+            _failing_module(), host, channel=0,
+            video_params={"stream": "main", "encoding": "h265"},
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, ["video_encoding"])
+        host.set_encoding.assert_awaited_once_with(0, "h265", "main")
 
 
 class TestApplyImage(unittest.TestCase):
-    def _make_host(self):
-        from reolink_aio.api import Host
-        return Host("192.168.1.1", "admin", "pass")
-
-    def test_image_kwargs_forwarded(self):
-        host = self._make_host()
-        image_calls = []
-
-        async def fake_set_image(ch, **kwargs):
-            image_calls.append((ch, kwargs))
-
-        host.set_image = fake_set_image
-
-        module = MagicMock()
+    def test_only_differing_fields_sent(self):
+        host = MagicMock()
+        host._image_settings = {0: {"Image": {"bright": 128, "contrast": "100", "hue": 128}}}
+        host.set_image = AsyncMock()
         changes = []
         reolink_camera._apply_image(
-            module,
-            host,
-            channel=0,
-            image_params={"brightness": 200, "contrast": 100},
-            check_mode=False,
-            changes=changes,
+            _failing_module(), host, channel=0,
+            image_params={"brightness": 200, "contrast": 100, "hue": None},
+            check_mode=False, changes=changes,
         )
-        self.assertIn("image", changes)
-        self.assertEqual(image_calls[0][1]["bright"], 200)
-        self.assertEqual(image_calls[0][1]["contrast"], 100)
-        self.assertNotIn("saturation", image_calls[0][1])
+        self.assertEqual(changes, ["image"])
+        host.set_image.assert_awaited_once_with(0, bright=200)
 
 
-class _FailJson(Exception):
-    """Stands in for AnsibleModule.fail_json, which never returns."""
+class TestApplyOsd(unittest.TestCase):
+    def _make_host(self):
+        host = MagicMock()
+        host._osd_settings = {0: {"Osd": {
+            "osdChannel": {"enable": 1, "name": "Garage", "pos": "Lower Right"},
+            "osdTime": {"enable": 1, "pos": "Top Center"},
+            "watermark": 0,
+        }}}
+        host.get_state = AsyncMock()
+        host.send_setting = AsyncMock()
+        return host
+
+    def test_idempotent_when_matching(self):
+        host = self._make_host()
+        changes = []
+        reolink_camera._apply_osd(
+            _failing_module(), host, 0, {"name": "Garage", "date_position": "Top Center", "watermark": False},
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, [])
+        host.send_setting.assert_not_awaited()
+
+    def test_name_change_sent(self):
+        host = self._make_host()
+        changes = []
+        reolink_camera._apply_osd(
+            _failing_module(), host, 0, {"name": "Garage Main Entrance", "watermark": False},
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, ["osd"])
+        osd = host.send_setting.await_args.args[0][0]["param"]["Osd"]
+        self.assertEqual(osd["osdChannel"]["name"], "Garage Main Entrance")
+
+    def test_off_hides_the_overlay(self):
+        host = self._make_host()
+        reolink_camera._apply_osd(
+            _failing_module(), host, 0, {"date_position": "Off"}, check_mode=False, changes=[],
+        )
+        osd = host.send_setting.await_args.args[0][0]["param"]["Osd"]
+        self.assertEqual(osd["osdTime"]["enable"], 0)
 
 
-def _failing_module():
-    module = MagicMock()
-    module.fail_json.side_effect = _FailJson
-    return module
+class TestApplyCompared(unittest.TestCase):
+    def test_skips_when_matching(self):
+        apply = AsyncMock()
+        changes = []
+        reolink_camera._apply_compared(_failing_module(), "audio", True, True, apply, check_mode=False, changes=changes)
+        self.assertEqual(changes, [])
+        apply.assert_not_called()
+
+    def test_unknown_current_is_sent(self):
+        apply = AsyncMock()
+        changes = []
+        reolink_camera._apply_compared(_failing_module(), "audio", True, None, apply, check_mode=False, changes=changes)
+        self.assertEqual(changes, ["audio"])
+        apply.assert_awaited_once()
+
+
+class TestApplyChannelOrDevice(unittest.TestCase):
+    """email_notifications, ftp_upload and recording."""
+
+    def _make_host(self, channel_supported, device_supported=True, enabled=True):
+        host = MagicMock()
+        host.state = {"enabled": enabled}
+        host.supported = lambda ch, cap: channel_supported if ch is not None else device_supported
+        host.get_state = AsyncMock()
+        host.read = lambda target: host.state["enabled"]
+
+        async def write(target, value):
+            host.writes.append((target, value))
+            host.state["enabled"] = value
+
+        host.writes = []
+        host.write = write
+        return host
+
+    def _apply(self, host, value, changes, check_mode=False):
+        reolink_camera._apply_channel_or_device(
+            _failing_module(), host, 0, value, "email_notifications", "email",
+            host.read, host.write, "GetEmail", check_mode, changes)
+
+    def test_device_wide_when_channel_unsupported(self):
+        host = self._make_host(channel_supported=False)
+        changes = []
+        self._apply(host, False, changes)
+        self.assertEqual(changes, ["email_notifications"])
+        self.assertEqual(host.writes, [(None, False)])
+
+    def test_channel_when_supported(self):
+        host = self._make_host(channel_supported=True)
+        self._apply(host, False, [])
+        self.assertEqual(host.writes, [(0, False)])
+
+    def test_idempotent(self):
+        host = self._make_host(channel_supported=False, enabled=False)
+        changes = []
+        self._apply(host, False, changes)
+        self.assertEqual(changes, [])
+        self.assertEqual(host.writes, [])
+
+    def test_unsupported_fails(self):
+        host = self._make_host(channel_supported=False, device_supported=False)
+        with self.assertRaises(_FailJson):
+            self._apply(host, False, [])
 
 
 class TestApplyFlipMirror(unittest.TestCase):
@@ -646,6 +801,36 @@ class TestPush(unittest.TestCase):
 
 
 class TestFacts(unittest.TestCase):
+    def test_switch_state_device_wide(self):
+        host = MagicMock()
+        host.supported = lambda ch, cap: ch is None
+        host.email_enabled = lambda target: {None: False}[target]
+        self.assertIs(reolink_facts._switch_state(host, 0, "email", host.email_enabled), False)
+
+    def test_active_webhooks(self):
+        host = MagicMock()
+        host.supported = lambda ch, cap: True
+        host.get_state = AsyncMock()
+        host._webhook_settings = {0: {"WebHook": [
+            {"index": 0, "indexEnable": 1}, {"index": 1, "indexEnable": 0}, {"index": 2, "indexEnable": -1},
+        ]}}
+        self.assertEqual(reolink_facts._active_webhooks(host, 0), 1)
+
+    def test_no_webhooks_without_support(self):
+        host = MagicMock()
+        host.supported = lambda ch, cap: False
+        self.assertEqual(reolink_facts._active_webhooks(host, 0), 0)
+
+    def test_firmware(self):
+        latest = MagicMock(version_string="v3.1.0.5000_2601010000", download_url="https://x", release_notes="notes")
+        latest.__gt__ = lambda self, other: True
+        host = MagicMock(sw_version="v3.1.0.4569_2502181272")
+        host._check_reolink_firmware = AsyncMock(return_value=latest)
+        fw = reolink_facts._firmware(host)
+        self.assertEqual(fw["latest"], "v3.1.0.5000_2601010000")
+        self.assertIs(fw["update_available"], True)
+        host._check_reolink_firmware.assert_awaited_once_with(None)
+
     def test_orientation_reads_isp_keys(self):
         host = MagicMock()
         host._isp_settings = {0: {"channel": 0, "rotation": 1, "mirroring": 0}}

@@ -48,6 +48,7 @@ options:
   use_https:
     description: Use HTTPS instead of HTTP.
     type: bool
+    default: true
   timeout:
     description: Connection timeout in seconds.
     type: int
@@ -146,6 +147,7 @@ try:
         connect,
         disconnect,
         run_async,
+        credentials_work,
         HAS_REOLINK,
     )
 except ImportError:
@@ -154,6 +156,7 @@ except ImportError:
         connect,
         disconnect,
         run_async,
+        credentials_work,
         HAS_REOLINK,
     )
 
@@ -189,7 +192,7 @@ def main():
             username=dict(type="str", default="admin"),
             password=dict(type="str", required=True, no_log=True),
             port=dict(type="int"),
-            use_https=dict(type="bool"),
+            use_https=dict(type="bool", default=True),
             timeout=dict(type="int", default=30),
             target_username=dict(type="str"),
             new_password=dict(type="str", no_log=True),
@@ -234,7 +237,9 @@ def main():
             else:
                 # Modify existing user if anything changed
                 updates = {}
-                if new_password is not None:
+                # Passwords cannot be read back, so try logging in with the
+                # wanted one: only a password that does not work is changed.
+                if new_password is not None and not credentials_work(module.params, target_username, new_password):
                     updates["oldPassword"] = module.params["password"]
                     updates["newPassword"] = new_password
                 # Only update privilege when the user explicitly passes it as non-default

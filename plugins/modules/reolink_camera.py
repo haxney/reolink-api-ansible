@@ -15,6 +15,10 @@ description:
   - Supports video stream settings, image adjustments, NTP configuration,
     time/date settings, IR lights, recording, and more.
   - All parameters are optional; only provided parameters are changed.
+  - Each setting is compared with the camera's current value and sent only if
+    it differs, so C(changed) means the camera was changed. The exceptions are
+    C(spotlight), which is always sent, and C(ntp.sync_now), which is an
+    action and never counts as a change.
   - Uses the C(reolink-aio) Python library (U(https://github.com/starkillerOG/reolink_aio)).
 author:
   - Dan Hackney (@haxney)
@@ -40,6 +44,7 @@ options:
   use_https:
     description: Use HTTPS instead of HTTP.
     type: bool
+    default: true
   timeout:
     description: Connection timeout in seconds.
     type: int
@@ -67,7 +72,10 @@ options:
         description: Synchronization interval in minutes (60-65535).
         type: int
       sync_now:
-        description: Trigger an immediate NTP synchronization after applying settings.
+        description:
+          - Trigger an immediate NTP synchronization after applying settings.
+          - It runs on every invocation but does not by itself mark the task
+            changed, since it is an action rather than a setting.
         type: bool
         default: false
   time:
@@ -205,11 +213,14 @@ options:
     description: On-screen display settings.
     type: dict
     suboptions:
+      name:
+        description: Camera name shown in the overlay.
+        type: str
       name_position:
-        description: Position of the camera name overlay (C(Upper Left), C(Top Center), C(Upper Right), or C(0) to disable).
+        description: Position of the camera name overlay (C(Upper Left), C(Top Center), C(Upper Right), C(Lower Left), C(Bottom Center), C(Lower Right)), or C(Off) to hide it.
         type: str
       date_position:
-        description: Position of the date/time overlay (C(Upper Left), C(Top Center), C(Upper Right), or C(0) to disable).
+        description: Position of the date/time overlay (same values as C(name_position)), or C(Off) to hide it.
         type: str
       watermark:
         description: Enable or disable the Reolink watermark.
@@ -241,7 +252,11 @@ options:
     type: bool
     version_added: "0.2.0"
   spotlight:
-    description: Enable or disable the white spotlight LED (if present).
+    description:
+      - Enable or disable the white spotlight LED (if present).
+      - Always sent, so it always marks the task changed, because a
+        spotlight's schedule, mode and brightness are not readable as one
+        on/off state.
     type: bool
   push_notifications:
     description: Enable or disable push notifications to the Reolink app.
@@ -389,6 +404,7 @@ changes:
 """
 
 import traceback
+import xml.etree.ElementTree as ET
 
 from ansible.module_utils.basic import AnsibleModule
 
@@ -403,6 +419,7 @@ try:
         ISP_ORIENTATION_KEYS,
         get_switch,
         push_enabled,
+        switch_target,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -415,36 +432,59 @@ except ImportError:
         ISP_ORIENTATION_KEYS,
         get_switch,
         push_enabled,
+        switch_target,
     )
 
 
+def _read(fn):
+    """The value fn() reads from reolink-aio's cache, or None if it cannot.
+
+    None never equals a wanted value, so an unreadable setting is sent rather
+    than skipped.
+    """
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
 def _apply_ntp(module, host, ntp_params, check_mode, changes):
+    """Set NTP, sending only the fields that differ.
+
+    sync_now syncs on every run but does not by itself mark the task changed:
+    it is an action, and counting it would make every run report a change.
+    """
     if ntp_params is None:
         return
-    kwargs = {}
-    if ntp_params.get("enabled") is not None:
-        kwargs["enable"] = ntp_params["enabled"]
-    if ntp_params.get("server") is not None:
-        kwargs["server"] = ntp_params["server"]
-    if ntp_params.get("port") is not None:
-        kwargs["port"] = ntp_params["port"]
-    if ntp_params.get("interval") is not None:
-        kwargs["interval"] = ntp_params["interval"]
+    wanted = {
+        "enable": ntp_params.get("enabled"),
+        "server": ntp_params.get("server"),
+        "port": ntp_params.get("port"),
+        "interval": ntp_params.get("interval"),
+    }
+    wanted = {k: v for k, v in wanted.items() if v is not None}
 
-    if not kwargs:
-        return
-
-    changes.append("ntp")
-    if not check_mode:
+    if wanted:
         try:
-            run_async(host.set_ntp(**kwargs))
+            run_async(host.get_state("GetNtp"))
+            current = host._ntp_settings["Ntp"]
         except Exception as exc:
-            module.fail_json(msg=f"Failed to set NTP settings: {exc}")
+            module.fail_json(msg=f"Could not read NTP settings: {exc}")
+        kwargs = {
+            k: v for k, v in wanted.items()
+            if (bool(current.get(k)) if k == "enable" else current.get(k)) != v
+        }
+        if kwargs:
+            changes.append("ntp")
+            if not check_mode:
+                try:
+                    run_async(host.set_ntp(**kwargs))
+                except Exception as exc:
+                    module.fail_json(msg=f"Failed to set NTP settings: {exc}")
 
     if ntp_params.get("sync_now") and not check_mode:
         try:
             run_async(host.sync_ntp())
-            changes.append("ntp_sync_now")
         except Exception as exc:
             module.warn(f"NTP sync_now failed: {exc}")
 
@@ -539,50 +579,65 @@ def _apply_time(module, host, time_params, check_mode, changes):
         module.fail_json(msg=f"Failed to set time settings: {exc}")
 
 
+def _baichuan_encoding(host, channel, stream):
+    """A stream's encoding read over Baichuan (command 56), the channel
+    set_encoding() writes through. HTTP GetEnc on the P330 has no vType."""
+    root = ET.fromstring(run_async(host.baichuan.send(cmd_id=56, channel=channel)))
+    return {"0": "h264", "1": "h265"}.get(root.find(f".//{stream}Stream/videoEncType").text)
+
+
 def _apply_video(module, host, channel, video_params, check_mode, changes):
+    """Set encoding, bitrate and frame rate, sending only what differs.
+
+    All three are read before anything is sent: set_encoding() goes over
+    Baichuan and leaves reolink-aio's cache stale.
+    """
     if video_params is None:
         return
     stream = video_params.get("stream", "main")
+    enc = _read(lambda: host._enc_settings[channel][f"{stream}Stream"]) or {}
+    settings = (
+        # (option, label, current value, setter)
+        ("encoding", "video_encoding",
+         enc.get("vType") or (video_params.get("encoding") and _read(lambda: _baichuan_encoding(host, channel, stream))),
+         host.set_encoding),
+        ("bitrate", "video_bitrate", enc.get("bitRate"), host.set_bit_rate),
+        ("frame_rate", "video_frame_rate", enc.get("frameRate"), host.set_frame_rate),
+    )
+    for option, label, current, setter in settings:
+        value = video_params.get(option)
+        if value is None or current == value:
+            continue
+        changes.append(label)
+        if check_mode:
+            continue
+        try:
+            run_async(setter(channel, value, stream))
+        except Exception as exc:
+            module.fail_json(msg=f"Failed to set video {option}: {exc}")
 
-    if video_params.get("encoding") is not None:
-        changes.append("video_encoding")
-        if not check_mode:
-            try:
-                run_async(host.set_encoding(channel, video_params["encoding"], stream))
-            except Exception as exc:
-                module.fail_json(msg=f"Failed to set video encoding: {exc}")
 
-    if video_params.get("bitrate") is not None:
-        changes.append("video_bitrate")
-        if not check_mode:
-            try:
-                run_async(host.set_bit_rate(channel, video_params["bitrate"], stream))
-            except Exception as exc:
-                module.fail_json(msg=f"Failed to set video bitrate: {exc}")
-
-    if video_params.get("frame_rate") is not None:
-        changes.append("video_frame_rate")
-        if not check_mode:
-            try:
-                run_async(host.set_frame_rate(channel, video_params["frame_rate"], stream))
-            except Exception as exc:
-                module.fail_json(msg=f"Failed to set video frame rate: {exc}")
+# image option -> (set_image() keyword, key in the GetImage block)
+_IMAGE_FIELDS = {
+    "brightness": "bright",
+    "contrast": "contrast",
+    "saturation": "saturation",
+    "hue": "hue",
+    "sharpen": "sharpen",
+}
 
 
 def _apply_image(module, host, channel, image_params, check_mode, changes):
+    """Set image adjustments, sending only the ones that differ."""
     if image_params is None:
         return
+    current = _read(lambda: host._image_settings[channel]["Image"]) or {}
     kwargs = {}
-    if image_params.get("brightness") is not None:
-        kwargs["bright"] = image_params["brightness"]
-    if image_params.get("contrast") is not None:
-        kwargs["contrast"] = image_params["contrast"]
-    if image_params.get("saturation") is not None:
-        kwargs["saturation"] = image_params["saturation"]
-    if image_params.get("hue") is not None:
-        kwargs["hue"] = image_params["hue"]
-    if image_params.get("sharpen") is not None:
-        kwargs["sharpen"] = image_params["sharpen"]
+    for option, key in _IMAGE_FIELDS.items():
+        value = image_params.get(option)
+        # The Baichuan fallback stores some of these as strings.
+        if value is not None and _read(lambda key=key: int(current[key])) != value:
+            kwargs[key] = value
 
     if not kwargs:
         return
@@ -596,53 +651,52 @@ def _apply_image(module, host, channel, image_params, check_mode, changes):
 
 
 def _apply_osd(module, host, channel, osd_params, check_mode, changes):
+    """Set the on-screen name, positions and watermark, if any differ.
+
+    reolink-aio has no setter for the name, so the GetOsd block is edited and
+    sent back whole as a raw SetOsd.
+    """
     if osd_params is None:
         return
     if not any(osd_params.get(k) is not None for k in ("name", "name_position", "date_position", "watermark")):
+        return
+
+    try:
+        run_async(host.get_state("GetOsd"))
+    except Exception as exc:
+        module.fail_json(msg=f"Could not read OSD settings: {exc}")
+    if not host._osd_settings.get(channel):
+        module.fail_json(msg=f"OSD not available on channel {channel}")
+
+    osd = host._osd_settings[channel]["Osd"]
+    wanted = {}  # (block, key) -> value
+    if osd_params.get("name") is not None:
+        wanted[("osdChannel", "name")] = osd_params["name"]
+    for option, block in (("name_position", "osdChannel"), ("date_position", "osdTime")):
+        pos = osd_params.get(option)
+        if pos == "Off":
+            wanted[(block, "enable")] = 0
+        elif pos is not None:
+            wanted[(block, "enable")] = 1
+            wanted[(block, "pos")] = pos
+    if osd_params.get("watermark") is not None and "watermark" in osd:
+        wanted[(None, "watermark")] = 1 if osd_params["watermark"] else 0
+
+    def _cell(block, key):
+        return osd if block is None else osd[block]
+
+    differing = {bk: v for bk, v in wanted.items() if _cell(*bk).get(bk[1]) != v}
+    if not differing:
         return
 
     changes.append("osd")
     if check_mode:
         return
 
-    # Fetch current OSD state so we can send a complete SetOsd body.
+    for (block, key), value in differing.items():
+        _cell(block, key)[key] = value
     try:
-        run_async(host.get_state("GetOsd"))
-    except Exception as exc:
-        module.warn(f"Could not retrieve OSD settings: {exc}")
-        return
-
-    if channel not in host._osd_settings or not host._osd_settings[channel]:
-        module.warn(f"OSD not available on channel {channel}, skipping")
-        return
-
-    body = [{"cmd": "SetOsd", "action": 0, "param": host._osd_settings[channel]}]
-    osd = body[0]["param"]["Osd"]
-
-    if osd_params.get("name") is not None:
-        osd["osdChannel"]["name"] = osd_params["name"]
-
-    if osd_params.get("name_position") is not None:
-        pos = osd_params["name_position"]
-        if pos == "Off":
-            osd["osdChannel"]["enable"] = 0
-        else:
-            osd["osdChannel"]["enable"] = 1
-            osd["osdChannel"]["pos"] = pos
-
-    if osd_params.get("date_position") is not None:
-        pos = osd_params["date_position"]
-        if pos == "Off":
-            osd["osdTime"]["enable"] = 0
-        else:
-            osd["osdTime"]["enable"] = 1
-            osd["osdTime"]["pos"] = pos
-
-    if osd_params.get("watermark") is not None and "watermark" in osd:
-        osd["watermark"] = 1 if osd_params["watermark"] else 0
-
-    try:
-        run_async(host.send_setting(body))
+        run_async(host.send_setting([{"cmd": "SetOsd", "action": 0, "param": host._osd_settings[channel]}]))
     except Exception as exc:
         module.fail_json(msg=f"Failed to set OSD settings: {exc}")
 
@@ -694,17 +748,52 @@ def _apply_flip_mirror(module, host, channel, flip, mirror, check_mode, changes)
         module.fail_json(msg=f"Failed to set flip/mirror settings: {exc}")
 
 
-def _apply_bool_setting(module, host, channel, value, setter_name, label, check_mode, changes):
-    """Generic helper for boolean channel settings."""
-    if value is None:
+def _apply_compared(module, label, value, current, apply, check_mode, changes):
+    """Run apply() unless the camera already has value.
+
+    current is what the camera reports (None if unknown, which never matches);
+    apply is a no-argument callable returning the setter's coroutine.
+    """
+    if value is None or current == value:
         return
     changes.append(label)
-    if not check_mode:
-        setter = getattr(host, setter_name)
-        try:
-            run_async(setter(channel, value))
-        except Exception as exc:
-            module.fail_json(msg=f"Failed to set {label}: {exc}")
+    if check_mode:
+        return
+    try:
+        run_async(apply())
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set {label}: {exc}")
+
+
+def _apply_channel_or_device(module, host, channel, value, label, capability, read, write, get_cmd, check_mode, changes):
+    """Switch a setting per channel where the camera has that, otherwise
+    device-wide, and read it back after setting.
+
+    Email, FTP and recording come in per-channel and device-wide shapes.
+    reolink-aio's setters raise for a channel the camera only switches
+    device-wide (and its device-wide legacy path silently does nothing when
+    no channel qualifies), so the target is chosen here.
+    """
+    if value is None:
+        return
+    try:
+        target = switch_target(host, channel, capability)
+    except Exception as exc:
+        module.fail_json(msg=f"{label}: {exc}")
+    if _read(lambda: read(target)) == value:
+        return
+
+    changes.append(label)
+    if check_mode:
+        return
+    try:
+        run_async(write(target, value))
+        run_async(host.get_state(cmd=get_cmd, ch=channel))
+        taken = read(target)
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set {label}: {exc}")
+    if taken != value:
+        module.fail_json(msg=f"{label}: the camera still reports {taken}")
 
 
 def _apply_push(module, host, channel, value, check_mode, changes):
@@ -843,19 +932,6 @@ def _apply_net_port(module, host, net_port_params, check_mode, changes):
             module.fail_json(msg=f"Failed to set network port settings: {exc}")
 
 
-def _apply_bool_setting_no_channel(module, host, value, setter_name, label, check_mode, changes):
-    """Generic helper for boolean host-level settings."""
-    if value is None:
-        return
-    changes.append(label)
-    if not check_mode:
-        setter = getattr(host, setter_name)
-        try:
-            run_async(setter(value))
-        except Exception as exc:
-            module.fail_json(msg=f"Failed to set {label}: {exc}")
-
-
 def main():
     ntp_spec = dict(
         enabled=dict(type="bool"),
@@ -966,32 +1042,43 @@ def main():
         _apply_image(module, host, channel, module.params.get("image"), check_mode, changes)
         _apply_osd(module, host, channel, module.params.get("osd"), check_mode, changes)
 
-        _apply_bool_setting(module, host, channel, module.params.get("ir_lights"), "set_ir_lights", "ir_lights", check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("recording"), "set_recording", "recording", check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("audio"), "set_audio", "audio", check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("motion_detection"), "set_motion_detection", "motion_detection", check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("spotlight"), "set_spotlight", "spotlight", check_mode, changes)
-        _apply_push(module, host, channel, module.params.get("push_notifications"), check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("email_notifications"), "set_email", "email_notifications", check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("ftp_upload"), "set_ftp", "ftp_upload", check_mode, changes)
+        params = module.params
+        # ir_lights true means "Auto"; an "On" state reads as unknown, so it
+        # is set.
+        _apply_compared(
+            module, "ir_lights", params.get("ir_lights"),
+            _read(lambda: {"Auto": True, "Off": False}.get(host._ir_settings[channel]["state"])),
+            lambda: host.set_ir_lights(channel, params["ir_lights"]), check_mode, changes)
+        _apply_compared(
+            module, "audio", params.get("audio"), _read(lambda: host.audio_record(channel)),
+            lambda: host.set_audio(channel, params["audio"]), check_mode, changes)
+        _apply_compared(
+            module, "motion_detection", params.get("motion_detection"),
+            _read(lambda: bool(host._md_alarm_settings[channel]["enable"])),
+            lambda: host.set_motion_detection(channel, params["motion_detection"]), check_mode, changes)
+        # A spotlight is more than on/off (schedule, mode, brightness), and
+        # its state alone cannot say whether those match, so it is always sent.
+        _apply_compared(
+            module, "spotlight", params.get("spotlight"), None,
+            lambda: host.set_spotlight(channel, params["spotlight"]), check_mode, changes)
+        _apply_push(module, host, channel, params.get("push_notifications"), check_mode, changes)
+        for option, capability, read, write, get_cmd in (
+            ("recording", "recording", host.recording_enabled, host.set_recording, "GetRec"),
+            ("email_notifications", "email", host.email_enabled, host.set_email, "GetEmail"),
+            ("ftp_upload", "ftp", host.ftp_enabled, host.set_ftp, "GetFtp"),
+        ):
+            _apply_channel_or_device(
+                module, host, channel, params.get(option), option, capability,
+                read, write, get_cmd, check_mode, changes)
         for option in _HOST_SWITCHES:
             _apply_host_switch(module, host, option, module.params.get(option), check_mode, changes)
 
-        if module.params.get("daynight") is not None:
-            changes.append("daynight")
-            if not check_mode:
-                try:
-                    run_async(host.set_daynight(channel, module.params["daynight"]))
-                except Exception as exc:
-                    module.fail_json(msg=f"Failed to set day/night mode: {exc}")
-
-        if module.params.get("backlight") is not None:
-            changes.append("backlight")
-            if not check_mode:
-                try:
-                    run_async(host.set_backlight(channel, module.params["backlight"]))
-                except Exception as exc:
-                    module.fail_json(msg=f"Failed to set backlight mode: {exc}")
+        _apply_compared(
+            module, "daynight", params.get("daynight"), _read(lambda: host.daynight_state(channel)),
+            lambda: host.set_daynight(channel, params["daynight"]), check_mode, changes)
+        _apply_compared(
+            module, "backlight", params.get("backlight"), _read(lambda: host.backlight_state(channel)),
+            lambda: host.set_backlight(channel, params["backlight"]), check_mode, changes)
 
         _apply_flip_mirror(
             module, host, channel,
