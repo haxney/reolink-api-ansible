@@ -142,6 +142,7 @@ sys.path.insert(0, _COLLECTION_ROOT)
 
 from plugins.module_utils import reolink_utils  # noqa: E402
 from plugins.modules import reolink_camera  # noqa: E402
+from plugins.modules import reolink_facts  # noqa: E402
 
 
 class TestRunAsync(unittest.TestCase):
@@ -313,7 +314,20 @@ class TestApplyImage(unittest.TestCase):
         self.assertNotIn("saturation", image_calls[0][1])
 
 
+class _FailJson(Exception):
+    """Stands in for AnsibleModule.fail_json, which never returns."""
+
+
+def _failing_module():
+    module = MagicMock()
+    module.fail_json.side_effect = _FailJson
+    return module
+
+
 class TestApplyFlipMirror(unittest.TestCase):
+    # Real cameras (RLC-810A, RLC-822A, P330) name these rotation and
+    # mirroring in GetIsp; 0.2.0 looked for flip and mirror and so never
+    # found them.
     def _make_host(self, isp):
         host = MagicMock()
         host._isp_settings = {0: isp}
@@ -322,7 +336,7 @@ class TestApplyFlipMirror(unittest.TestCase):
         return host
 
     def test_flip_and_mirror_sent_when_changed(self):
-        host = self._make_host({"channel": 0, "flip": 0, "mirror": 0})
+        host = self._make_host({"channel": 0, "rotation": 0, "mirroring": 0})
         module = MagicMock()
         changes = []
         reolink_camera._apply_flip_mirror(
@@ -333,11 +347,23 @@ class TestApplyFlipMirror(unittest.TestCase):
         host.send_setting.assert_awaited_once()
         body = host.send_setting.await_args.args[0]
         self.assertEqual(body[0]["cmd"], "SetIsp")
-        self.assertEqual(body[0]["param"]["Isp"]["flip"], 1)
-        self.assertEqual(body[0]["param"]["Isp"]["mirror"], 1)
+        self.assertEqual(body[0]["param"]["Isp"]["rotation"], 1)
+        self.assertEqual(body[0]["param"]["Isp"]["mirroring"], 1)
+
+    def test_only_mirror_changed_when_flip_already_set(self):
+        host = self._make_host({"channel": 0, "rotation": 1, "mirroring": 0})
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_flip_mirror(
+            module, host, channel=0, flip=True, mirror=True,
+            check_mode=False, changes=changes,
+        )
+        body = host.send_setting.await_args.args[0]
+        self.assertEqual(body[0]["param"]["Isp"]["rotation"], 1)
+        self.assertEqual(body[0]["param"]["Isp"]["mirroring"], 1)
 
     def test_idempotent_when_already_matching(self):
-        host = self._make_host({"channel": 0, "flip": 1, "mirror": 0})
+        host = self._make_host({"channel": 0, "rotation": 1, "mirroring": 0})
         module = MagicMock()
         changes = []
         reolink_camera._apply_flip_mirror(
@@ -348,7 +374,7 @@ class TestApplyFlipMirror(unittest.TestCase):
         host.send_setting.assert_not_awaited()
 
     def test_check_mode_does_not_send(self):
-        host = self._make_host({"channel": 0, "flip": 0, "mirror": 0})
+        host = self._make_host({"channel": 0, "rotation": 0, "mirroring": 0})
         module = MagicMock()
         changes = []
         reolink_camera._apply_flip_mirror(
@@ -358,20 +384,21 @@ class TestApplyFlipMirror(unittest.TestCase):
         self.assertIn("flip_mirror", changes)
         host.send_setting.assert_not_awaited()
 
-    def test_unsupported_key_skipped(self):
-        host = self._make_host({"channel": 0, "flip": 0})  # no "mirror" key
-        module = MagicMock()
+    def test_unsupported_key_fails(self):
+        host = self._make_host({"channel": 0, "rotation": 0})  # no "mirroring"
+        module = _failing_module()
         changes = []
-        reolink_camera._apply_flip_mirror(
-            module, host, channel=0, flip=None, mirror=True,
-            check_mode=False, changes=changes,
-        )
+        with self.assertRaises(_FailJson):
+            reolink_camera._apply_flip_mirror(
+                module, host, channel=0, flip=None, mirror=True,
+                check_mode=False, changes=changes,
+            )
+        self.assertIn("mirroring", module.fail_json.call_args.kwargs["msg"])
         self.assertEqual(changes, [])
-        module.warn.assert_called_once()
         host.send_setting.assert_not_awaited()
 
     def test_none_skipped(self):
-        host = self._make_host({"channel": 0, "flip": 0, "mirror": 0})
+        host = self._make_host({"channel": 0, "rotation": 0, "mirroring": 0})
         module = MagicMock()
         changes = []
         reolink_camera._apply_flip_mirror(
@@ -380,6 +407,278 @@ class TestApplyFlipMirror(unittest.TestCase):
         )
         self.assertEqual(changes, [])
         host.get_state.assert_not_awaited()
+
+
+# The US rule: 2nd Sunday of March to 1st Sunday of November, at 02:00.
+_US_DST = {
+    "enabled": True,
+    "offset": 1,
+    "start": {"month": 3, "week": 2, "weekday": 0, "hour": 2, "minute": 0, "second": 0},
+    "end": {"month": 11, "week": 1, "weekday": 0, "hour": 2, "minute": 0, "second": 0},
+}
+
+
+def _get_time_response(time_zone=14400, dst_enable=0):
+    """A GetTime body as an RLC-810A returns it (firmware v3.1.0.4569)."""
+    return {
+        "Dst": {
+            "enable": dst_enable, "offset": 1,
+            "startMon": 3, "startWeek": 2, "startWeekday": 0,
+            "startHour": 2, "startMin": 0, "startSec": 0,
+            "endMon": 10, "endWeek": 5, "endWeekday": 0,
+            "endHour": 2, "endMin": 0, "endSec": 0,
+        },
+        "Time": {
+            "year": 2026, "mon": 10, "day": 18, "hour": 13, "min": 34, "sec": 19,
+            "hourFmt": 1, "isDst": 0, "timeFmt": "DD/MM/YYYY", "timeZone": time_zone,
+        },
+    }
+
+
+class TestApplyTime(unittest.TestCase):
+    def _make_host(self, settings):
+        host = MagicMock()
+        host._time_settings = settings
+        host.get_state = AsyncMock()
+        host.send_setting = AsyncMock()
+        return host
+
+    def test_zone_and_dst_sent_in_one_set_time(self):
+        host = self._make_host(_get_time_response())
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_time(
+            module, host, {"timezone_offset": 18000, "dst": _US_DST},
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, ["time"])
+        host.send_setting.assert_awaited_once()
+        body = host.send_setting.await_args.args[0]
+        self.assertEqual(body[0]["cmd"], "SetTime")
+        param = body[0]["param"]
+        self.assertEqual(param["Time"]["timeZone"], 18000)
+        self.assertEqual(param["Dst"]["enable"], 1)
+        self.assertEqual(param["Dst"]["endMon"], 11)
+        self.assertEqual(param["Dst"]["endWeek"], 1)
+        # Fields not asked about go back as the camera sent them.
+        self.assertEqual(param["Time"]["timeFmt"], "DD/MM/YYYY")
+        self.assertEqual(param["Dst"]["startMon"], 3)
+
+    def test_idempotent_when_already_matching(self):
+        settings = _get_time_response(time_zone=18000, dst_enable=1)
+        settings["Dst"].update(endMon=11, endWeek=1)
+        host = self._make_host(settings)
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_time(
+            module, host, {"timezone_offset": 18000, "hours_24": False, "dst": _US_DST},
+            check_mode=False, changes=changes,
+        )
+        self.assertEqual(changes, [])
+        host.send_setting.assert_not_awaited()
+
+    def test_hours_24_maps_to_hour_format(self):
+        host = self._make_host(_get_time_response())
+        module = MagicMock()
+        reolink_camera._apply_time(
+            module, host, {"hours_24": True}, check_mode=False, changes=[],
+        )
+        body = host.send_setting.await_args.args[0]
+        self.assertEqual(body[0]["param"]["Time"]["hourFmt"], 0)
+
+    def test_check_mode_does_not_send(self):
+        host = self._make_host(_get_time_response())
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_time(
+            module, host, {"dst": {"enabled": True}}, check_mode=True, changes=changes,
+        )
+        self.assertEqual(changes, ["time"])
+        host.send_setting.assert_not_awaited()
+
+    def test_out_of_range_dst_field_fails_before_contacting_camera(self):
+        host = self._make_host(_get_time_response())
+        module = _failing_module()
+        with self.assertRaises(_FailJson):
+            reolink_camera._apply_time(
+                module, host, {"dst": {"start": {"weekday": 7}}},
+                check_mode=False, changes=[],
+            )
+        self.assertIn("dst.start.weekday", module.fail_json.call_args.kwargs["msg"])
+        host.get_state.assert_not_awaited()
+
+    def test_none_skipped(self):
+        host = self._make_host(_get_time_response())
+        module = MagicMock()
+        changes = []
+        reolink_camera._apply_time(module, host, None, check_mode=False, changes=changes)
+        self.assertEqual(changes, [])
+        host.get_state.assert_not_awaited()
+
+
+class TestApplyHostSwitch(unittest.TestCase):
+    """auto_upgrade, upnp and ddns: raw Get/Set of one enable flag."""
+
+    def _make_host(self, blocks):
+        # blocks: {"AutoUpgrade": {"enable": 1}, ...}, mutated by Set like a camera.
+        host = MagicMock()
+        host.sent = []
+        host.ignore_set = False
+
+        async def send(body, expected_response_type=None):
+            block = body[0]["cmd"][len("Get"):]
+            return [{"cmd": body[0]["cmd"], "code": 0, "value": {block: dict(blocks[block])}}]
+
+        async def send_setting(body):
+            host.sent.append(body)
+            block = body[0]["cmd"][len("Set"):]
+            if not host.ignore_set:
+                blocks[block] = dict(body[0]["param"][block])
+
+        host.send = send
+        host.send_setting = send_setting
+        return host
+
+    def test_disables_and_reads_back(self):
+        host = self._make_host({"AutoUpgrade": {"enable": 1}})
+        module = _failing_module()
+        changes = []
+        reolink_camera._apply_host_switch(module, host, "auto_upgrade", False, check_mode=False, changes=changes)
+        self.assertEqual(changes, ["auto_upgrade"])
+        self.assertEqual(host.sent, [[{"cmd": "SetAutoUpgrade", "action": 0, "param": {"AutoUpgrade": {"enable": 0}}}]])
+
+    def test_keeps_rest_of_block(self):
+        host = self._make_host({"Ddns": {"enable": 1, "type": "no-ip", "domain": "cam.example"}})
+        module = _failing_module()
+        reolink_camera._apply_host_switch(module, host, "ddns", False, check_mode=False, changes=[])
+        sent = host.sent[0][0]["param"]["Ddns"]
+        self.assertEqual(sent, {"enable": 0, "type": "no-ip", "domain": "cam.example"})
+
+    def test_idempotent_when_already_matching(self):
+        host = self._make_host({"Upnp": {"enable": 0}})
+        module = _failing_module()
+        changes = []
+        reolink_camera._apply_host_switch(module, host, "upnp", False, check_mode=False, changes=changes)
+        self.assertEqual(changes, [])
+        self.assertEqual(host.sent, [])
+
+    def test_check_mode_does_not_send(self):
+        host = self._make_host({"AutoUpgrade": {"enable": 1}})
+        module = _failing_module()
+        changes = []
+        reolink_camera._apply_host_switch(module, host, "auto_upgrade", False, check_mode=True, changes=changes)
+        self.assertEqual(changes, ["auto_upgrade"])
+        self.assertEqual(host.sent, [])
+
+    def test_fails_when_camera_does_not_take_it(self):
+        host = self._make_host({"AutoUpgrade": {"enable": 1}})
+        host.ignore_set = True
+        module = _failing_module()
+        with self.assertRaises(_FailJson):
+            reolink_camera._apply_host_switch(module, host, "auto_upgrade", False, check_mode=False, changes=[])
+        self.assertIn("still reports enable=1", module.fail_json.call_args.kwargs["msg"])
+
+    def test_none_skipped(self):
+        host = self._make_host({})
+        module = _failing_module()
+        changes = []
+        reolink_camera._apply_host_switch(module, host, "upnp", None, check_mode=False, changes=changes)
+        self.assertEqual(changes, [])
+
+
+class TestPush(unittest.TestCase):
+    # The three shapes GetPush/GetPushV20 return, keyed by what they switch.
+    DEVICE_WIDE = {"enable": 1, "schedule": {"channel": 0, "table": {"MD": "1" * 168}}}
+    PER_CHANNEL_V20 = {"scheduleEnable": 1, "schedule": {"channel": 0}}
+    LEGACY = {"schedule": {"enable": 1, "channel": 0}}
+
+    def _make_host(self, settings, channel_supported, device_supported=True):
+        host = MagicMock()
+        host._push_settings = {0: settings}
+        host.get_state = AsyncMock()
+        host.supported = lambda ch, cap: channel_supported if ch is not None else device_supported
+
+        async def set_push(ch, enable):
+            host.set_push_calls.append((ch, enable))
+            key = "scheduleEnable" if "scheduleEnable" in settings else "enable"
+            if "schedule" in settings and key not in settings:
+                settings["schedule"]["enable"] = int(enable)
+            else:
+                settings[key] = int(enable)
+
+        host.set_push_calls = []
+        host.set_push = set_push
+        return host
+
+    def test_reads_each_shape(self):
+        for settings in (self.DEVICE_WIDE, self.PER_CHANNEL_V20, self.LEGACY):
+            host = self._make_host(dict(settings), channel_supported=True)
+            self.assertIs(reolink_utils.push_enabled(host, 0), True)
+
+    def test_device_wide_switch_used_when_channel_unsupported(self):
+        # RLC-810A, RLC-822A and P330: supported(0, "push") is false.
+        host = self._make_host({"enable": 1, "schedule": {"channel": 0}}, channel_supported=False)
+        module = _failing_module()
+        changes = []
+        reolink_camera._apply_push(module, host, 0, False, check_mode=False, changes=changes)
+        self.assertEqual(changes, ["push_notifications"])
+        self.assertEqual(host.set_push_calls, [(None, False)])
+
+    def test_channel_switch_used_when_supported(self):
+        host = self._make_host({"scheduleEnable": 1, "schedule": {"channel": 0}}, channel_supported=True)
+        module = _failing_module()
+        reolink_camera._apply_push(module, host, 0, False, check_mode=False, changes=[])
+        self.assertEqual(host.set_push_calls, [(0, False)])
+
+    def test_idempotent_when_already_off(self):
+        host = self._make_host({"enable": 0, "schedule": {"channel": 0}}, channel_supported=False)
+        module = _failing_module()
+        changes = []
+        reolink_camera._apply_push(module, host, 0, False, check_mode=False, changes=changes)
+        self.assertEqual(changes, [])
+        self.assertEqual(host.set_push_calls, [])
+
+    def test_unsupported_fails(self):
+        host = self._make_host({}, channel_supported=False, device_supported=False)
+        module = _failing_module()
+        with self.assertRaises(_FailJson):
+            reolink_camera._apply_push(module, host, 0, False, check_mode=False, changes=[])
+
+
+class TestFacts(unittest.TestCase):
+    def test_orientation_reads_isp_keys(self):
+        host = MagicMock()
+        host._isp_settings = {0: {"channel": 0, "rotation": 1, "mirroring": 0}}
+        host.get_state = AsyncMock()
+        self.assertEqual(reolink_facts._orientation(host, 0), {"flip": True, "mirror": False})
+
+    def test_orientation_none_where_missing(self):
+        host = MagicMock()
+        host._isp_settings = {0: {"channel": 0}}
+        host.get_state = AsyncMock()
+        self.assertEqual(reolink_facts._orientation(host, 0), {"flip": None, "mirror": None})
+
+    def test_get_switch(self):
+        host = MagicMock()
+        host.send = AsyncMock(return_value=[{"cmd": "GetUpnp", "code": 0, "value": {"Upnp": {"enable": 0}}}])
+        self.assertEqual(reolink_utils.get_switch(host, "Upnp"), {"enable": 0})
+
+    def test_clock(self):
+        from datetime import datetime, timedelta, timezone
+
+        edt = timezone(timedelta(hours=-4))
+        camera_now = datetime.now(edt).replace(microsecond=0) + timedelta(seconds=30)
+        host = MagicMock()
+        host.async_get_time = AsyncMock(return_value=camera_now)
+        settings = _get_time_response(time_zone=18000, dst_enable=1)
+        host._time_settings = settings
+        clock = reolink_facts._clock(host)
+        self.assertEqual(clock["utc_offset"], -14400)
+        self.assertAlmostEqual(clock["clock_error"], 30, delta=2)
+        self.assertEqual(clock["local_time"], camera_now.replace(tzinfo=None).isoformat())
+        self.assertEqual(clock["timezone_offset"], 18000)
+        self.assertTrue(clock["dst"]["enabled"])
+        self.assertEqual(clock["dst"]["end"], {"month": 10, "week": 5, "weekday": 0, "hour": 2, "minute": 0, "second": 0})
 
 
 if __name__ == "__main__":

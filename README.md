@@ -162,9 +162,61 @@ optional. Only supplied parameters are modified.
 | `daynight` | str | `Auto` / `Color` / `Black&White` |
 | `backlight` | str | `DynamicRangeControl` / `BackLightControl` / `Off` |
 | `spotlight` | bool | Enable/disable white spotlight |
-| `push_notifications` | bool | Enable/disable app push notifications |
+| `flip` | bool | Flip the image vertically (ISP `rotation`) |
+| `mirror` | bool | Mirror the image horizontally (ISP `mirroring`); an upside-down mount needs both |
+| `push_notifications` | bool | Enable/disable push notifications via Reolink (device-wide where the camera has no per-channel switch) |
 | `email_notifications` | bool | Enable/disable email alerts |
 | `ftp_upload` | bool | Enable/disable FTP upload on motion |
+| `net_port` | dict | Enable/disable the `rtsp`, `onvif` and `rtmp` servers |
+| `p2p_enabled` | bool | Enable/disable P2P relay through Reolink's servers |
+| `auto_upgrade` | bool | Enable/disable automatic firmware upgrades from Reolink |
+| `upnp` | bool | Enable/disable UPnP port mapping on the router |
+| `ddns` | bool | Enable/disable dynamic DNS registration |
+
+`flip`, `mirror`, `time`, `push_notifications`, `auto_upgrade`, `upnp` and
+`ddns` only send a change when the camera differs, and fail the task if the
+camera lacks the setting or does not take it.
+
+#### Stopping the camera phoning home
+
+P2P, push notifications, automatic firmware upgrades, UPnP and DDNS all reach
+outside servers, and all can be turned off:
+
+```yaml
+p2p_enabled: false
+push_notifications: false
+auto_upgrade: false
+upnp: false
+ddns: false
+```
+
+This stops the camera asking. Only blocking its internet access at the network
+stops it succeeding. NTP is the one outbound connection a camera needs; point
+`ntp.server` at a local server to keep that inside the LAN too.
+
+#### `time` sub-options
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `date_format` | str | `DD/MM/YYYY`, `MM/DD/YYYY` or `YYYY/MM/DD` |
+| `hours_24` | bool | 24-hour clock |
+| `timezone_offset` | int | Standard-time offset in seconds WEST of UTC (`18000` for UTC-5) |
+| `dst` | dict | DST rule: `enabled`, `offset` (hours), and `start`/`end`, each `month`, `week` (1-4, 5 = last), `weekday` (0 = Sunday), `hour`, `minute`, `second` |
+
+With a DST rule the camera changes its own clock at the transitions, so give
+`timezone_offset` the standard (winter) offset. US Eastern:
+
+```yaml
+time:
+  timezone_offset: 18000
+  dst:
+    enabled: true
+    offset: 1
+    start: {month: 3, week: 2, weekday: 0, hour: 2, minute: 0, second: 0}
+    end: {month: 11, week: 1, weekday: 0, hour: 2, minute: 0, second: 0}
+```
+
+`time` is applied before `ntp`, so `ntp.sync_now` sets the clock in the new zone.
 
 #### `ntp` sub-options
 
@@ -213,7 +265,15 @@ All values are integers in the range 0–255.
 ### `reolink_facts`
 
 No extra parameters beyond the common connection options. Returns a `facts` dict
-containing device info and per-channel state.
+containing device info and per-channel state, including what playbooks need to
+check that settings took:
+
+- `time`: the clock the camera shows (`local_time`), the UTC offset it is
+  applying now with DST included (`utc_offset`, seconds east of UTC), its error
+  against the controller's clock (`clock_error`), and its zone and DST settings
+- `outbound`: `p2p`, `auto_upgrade`, `upnp` and `ddns`, each true if on
+- `net_port`: whether `rtsp`, `onvif` and `rtmp` are enabled
+- per channel: `flip`, `mirror` and `push_notifications`
 
 ---
 

@@ -71,18 +71,86 @@ options:
         type: bool
         default: false
   time:
-    description: Time and date settings.
+    description:
+      - Time and date settings, applied with a single SetTime.
+      - Only fields that differ from the camera's are changed.
+      - Applied before C(ntp), so that C(ntp.sync_now) sets the clock in the
+        new time zone.
     type: dict
     suboptions:
       date_format:
-        description: Date display format (e.g. C(DD/MM/YYYY), C(MM/DD/YYYY), C(YYYY/MM/DD)).
+        description: Date display format.
         type: str
+        choices: ["DD/MM/YYYY", "MM/DD/YYYY", "YYYY/MM/DD"]
       hours_24:
         description: Use 24-hour clock format.
         type: bool
       timezone_offset:
-        description: Timezone offset from UTC in seconds (e.g. -18000 for UTC-5).
+        description:
+          - Standard-time offset from UTC in seconds, in Reolink's convention
+            of positive values WEST of UTC (e.g. C(18000) for UTC-5).
+          - With C(dst) enabled, give the standard (winter) offset; the camera
+            adds C(dst.offset) during the DST period itself.
         type: int
+      dst:
+        description:
+          - Daylight saving time rule. The camera applies it on its own, so a
+            camera with a rule needs no changes at the transitions.
+          - Each transition is given as the Nth C(weekday) of C(month), at a
+            local time.
+        type: dict
+        version_added: "0.3.0"
+        suboptions:
+          enabled:
+            description: Apply the DST rule.
+            type: bool
+          offset:
+            description: Hours added during DST.
+            type: int
+          start:
+            description: When DST begins.
+            type: dict
+            suboptions:
+              month:
+                description: Month, 1-12.
+                type: int
+              week:
+                description: Which occurrence of C(weekday) in the month, 1-4, or 5 for the last.
+                type: int
+              weekday:
+                description: Day of the week, 0-6, where 0 is Sunday.
+                type: int
+              hour:
+                description: Hour, 0-23.
+                type: int
+              minute:
+                description: Minute, 0-59.
+                type: int
+              second:
+                description: Second, 0-59.
+                type: int
+          end:
+            description: When DST ends. Same keys as C(start).
+            type: dict
+            suboptions:
+              month:
+                description: Month, 1-12.
+                type: int
+              week:
+                description: Which occurrence of C(weekday) in the month, 1-4, or 5 for the last.
+                type: int
+              weekday:
+                description: Day of the week, 0-6, where 0 is Sunday.
+                type: int
+              hour:
+                description: Hour, 0-23.
+                type: int
+              minute:
+                description: Minute, 0-59.
+                type: int
+              second:
+                description: Second, 0-59.
+                type: int
   video:
     description: Video stream encoding settings.
     type: dict
@@ -160,16 +228,16 @@ options:
     choices: ["DynamicRangeControl", "BackLightControl", "Off"]
   flip:
     description:
-      - Flip the image vertically (rotate 180 degrees on the vertical axis).
-      - Applied via the ISP settings. Cameras that do not expose a flip setting
-        are skipped with a warning.
+      - Flip the image vertically. The Reolink app's "Flip"; the ISP's C(rotation).
+      - An upside-down camera needs C(flip) and C(mirror) together, which is a
+        180 degree rotation. C(flip) alone leaves the image upright but mirrored.
+      - Fails on a camera that has no such setting.
     type: bool
     version_added: "0.2.0"
   mirror:
     description:
-      - Mirror the image horizontally.
-      - Applied via the ISP settings. Cameras that do not expose a mirror setting
-        are skipped with a warning.
+      - Mirror the image horizontally. The Reolink app's "Mirror"; the ISP's C(mirroring).
+      - Fails on a camera that has no such setting.
     type: bool
     version_added: "0.2.0"
   spotlight:
@@ -201,6 +269,41 @@ options:
       rtmp:
         description: Enable or disable the RTMP port (1935).
         type: bool
+  p2p_enabled:
+    description:
+      - Enable or disable P2P, the UID-based relay through Reolink's servers
+        that the Reolink app uses to reach the camera from outside the LAN.
+      - Disabling it restarts the camera's HTTP service, so it is applied last.
+    type: bool
+    version_added: "0.2.0"
+  auto_upgrade:
+    description:
+      - Enable or disable automatic firmware upgrades, for which the camera
+        polls Reolink's update servers.
+      - With it off, firmware is only upgraded by hand.
+      - Read back after setting; the task fails if the camera did not take it.
+    type: bool
+    version_added: "0.3.0"
+  upnp:
+    description:
+      - Enable or disable UPnP, by which the camera asks the router to open
+        inbound ports to it.
+      - Read back after setting; the task fails if the camera did not take it.
+    type: bool
+    version_added: "0.3.0"
+  ddns:
+    description:
+      - Enable or disable dynamic DNS, by which the camera registers its
+        public address with a DDNS provider. Only the switch is changed; the
+        provider settings are left as they are.
+      - Read back after setting; the task fails if the camera did not take it.
+    type: bool
+    version_added: "0.3.0"
+notes:
+  - The camera reaches outside servers through P2P, push notifications,
+    automatic firmware upgrades, UPnP, DDNS, email, FTP and NTP. All but NTP
+    can be switched off here. Turning these off does not stop a camera from
+    trying; blocking its internet access at the network is the only guarantee.
 """
 
 EXAMPLES = r"""
@@ -228,6 +331,22 @@ EXAMPLES = r"""
     password: secretpass
     channel: 3
     ir_lights: false
+
+- name: US Eastern time, following DST on its own
+  haxney.reolink.reolink_camera:
+    hostname: 192.168.1.100
+    password: mypassword
+    time:
+      timezone_offset: 18000  # EST, UTC-5
+      dst:
+        enabled: true
+        offset: 1
+        start: {month: 3, week: 2, weekday: 0, hour: 2, minute: 0, second: 0}
+        end: {month: 11, week: 1, weekday: 0, hour: 2, minute: 0, second: 0}
+    ntp:
+      enabled: true
+      server: pool.ntp.org
+      sync_now: true
 
 - name: Flip and mirror a ceiling-mounted camera
   haxney.reolink.reolink_camera:
@@ -281,6 +400,9 @@ try:
         run_async,
         HAS_REOLINK,
         REOLINK_IMP_ERR,
+        ISP_ORIENTATION_KEYS,
+        get_switch,
+        push_enabled,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -290,6 +412,9 @@ except ImportError:
         run_async,
         HAS_REOLINK,
         REOLINK_IMP_ERR,
+        ISP_ORIENTATION_KEYS,
+        get_switch,
+        push_enabled,
     )
 
 
@@ -324,26 +449,94 @@ def _apply_ntp(module, host, ntp_params, check_mode, changes):
             module.warn(f"NTP sync_now failed: {exc}")
 
 
+# Reolink names the two ends of the DST period with flat, prefixed keys
+# (startMon ... endSec). Option name -> (key suffix, lowest, highest).
+_DST_TRANSITION_FIELDS = {
+    "month": ("Mon", 1, 12),
+    "week": ("Week", 1, 5),
+    "weekday": ("Weekday", 0, 6),
+    "hour": ("Hour", 0, 23),
+    "minute": ("Min", 0, 59),
+    "second": ("Sec", 0, 59),
+}
+
+
+def _desired_time_fields(module, time_params):
+    """Translate the time option into the Time and Dst blocks of SetTime.
+
+    Returns the two blocks holding only the fields the caller set.
+    """
+    time_fields = {}
+    if time_params.get("date_format") is not None:
+        time_fields["timeFmt"] = time_params["date_format"]
+    if time_params.get("hours_24") is not None:
+        time_fields["hourFmt"] = 0 if time_params["hours_24"] else 1
+    offset = time_params.get("timezone_offset")
+    if offset is not None:
+        # The range reolink-aio's set_time() enforces.
+        if not -43200 <= offset <= 50400:
+            module.fail_json(msg=f"timezone_offset {offset} is outside -43200..50400")
+        time_fields["timeZone"] = offset
+
+    dst_fields = {}
+    dst = time_params.get("dst") or {}
+    if dst.get("enabled") is not None:
+        dst_fields["enable"] = 1 if dst["enabled"] else 0
+    if dst.get("offset") is not None:
+        dst_fields["offset"] = dst["offset"]
+    for edge in ("start", "end"):
+        transition = dst.get(edge) or {}
+        for name, (suffix, lowest, highest) in _DST_TRANSITION_FIELDS.items():
+            value = transition.get(name)
+            if value is None:
+                continue
+            if not lowest <= value <= highest:
+                module.fail_json(msg=f"dst.{edge}.{name} {value} is outside {lowest}..{highest}")
+            dst_fields[edge + suffix] = value
+
+    return time_fields, dst_fields
+
+
 def _apply_time(module, host, time_params, check_mode, changes):
+    """Set display formats, time zone and DST rule with one SetTime.
+
+    reolink-aio's set_time() has no DST support, so the GetTime body is edited
+    and sent back whole, as set_time() itself does. Only fields that differ
+    count as a change, and nothing is sent when none do.
+    """
     if time_params is None:
         return
-    kwargs = {}
-    if time_params.get("date_format") is not None:
-        kwargs["dateFmt"] = time_params["date_format"]
-    if time_params.get("hours_24") is not None:
-        kwargs["hours24"] = time_params["hours_24"]
-    if time_params.get("timezone_offset") is not None:
-        kwargs["tzOffset"] = time_params["timezone_offset"]
+    time_fields, dst_fields = _desired_time_fields(module, time_params)
+    if not time_fields and not dst_fields:
+        return
 
-    if not kwargs:
+    try:
+        run_async(host.get_state("GetTime"))
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to read time settings: {exc}")
+    current = host._time_settings
+    if not current or "Time" not in current:
+        module.fail_json(msg="Camera returned no time settings")
+    if dst_fields and "Dst" not in current:
+        module.fail_json(msg="Camera has no DST settings")
+
+    time_fields = {k: v for k, v in time_fields.items() if current["Time"].get(k) != v}
+    dst_fields = {k: v for k, v in dst_fields.items() if current["Dst"].get(k) != v}
+    if not time_fields and not dst_fields:
         return
 
     changes.append("time")
-    if not check_mode:
-        try:
-            run_async(host.set_time(**kwargs))
-        except Exception as exc:
-            module.fail_json(msg=f"Failed to set time settings: {exc}")
+    if check_mode:
+        return
+
+    current["Time"].update(time_fields)
+    if dst_fields:
+        current["Dst"].update(dst_fields)
+    body = [{"cmd": "SetTime", "action": 0, "param": current}]
+    try:
+        run_async(host.send_setting(body))
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set time settings: {exc}")
 
 
 def _apply_video(module, host, channel, video_params, check_mode, changes):
@@ -461,7 +654,8 @@ def _apply_flip_mirror(module, host, channel, flip, mirror, check_mode, changes)
     block set_daynight() mutates — and send a single SetIsp. Both are handled
     together so we fetch and send once, avoiding two ISP restarts.
     """
-    if flip is None and mirror is None:
+    requested = {name: value for name, value in (("flip", flip), ("mirror", mirror)) if value is not None}
+    if not requested:
         return
 
     # Fetch current ISP state so we can compare (idempotency) and send a
@@ -469,25 +663,21 @@ def _apply_flip_mirror(module, host, channel, flip, mirror, check_mode, changes)
     try:
         run_async(host.get_state(cmd="GetIsp", ch=channel))
     except Exception as exc:
-        module.warn(f"Could not retrieve ISP settings: {exc}")
-        return
+        module.fail_json(msg=f"Could not retrieve ISP settings: {exc}")
 
     isp = host._isp_settings.get(channel)
     if not isp:
-        module.warn(f"ISP not available on channel {channel}, skipping flip/mirror")
-        return
+        module.fail_json(msg=f"ISP not available on channel {channel}, cannot set {' or '.join(requested)}")
 
+    # A requested setting the camera lacks is an error, not a warning: 0.2.0
+    # skipped these with a warning, and so never set either one on any camera.
     desired = {}
-    if flip is not None:
-        if "flip" not in isp:
-            module.warn(f"flip not supported on channel {channel}, skipping")
-        elif bool(isp["flip"]) != flip:
-            desired["flip"] = 1 if flip else 0
-    if mirror is not None:
-        if "mirror" not in isp:
-            module.warn(f"mirror not supported on channel {channel}, skipping")
-        elif bool(isp["mirror"]) != mirror:
-            desired["mirror"] = 1 if mirror else 0
+    for name, value in requested.items():
+        key = ISP_ORIENTATION_KEYS[name]
+        if key not in isp:
+            module.fail_json(msg=f"{name} is not supported on channel {channel}: its ISP settings have no '{key}'")
+        if bool(isp[key]) != value:
+            desired[key] = 1 if value else 0
 
     if not desired:
         return
@@ -515,6 +705,76 @@ def _apply_bool_setting(module, host, channel, value, setter_name, label, check_
             run_async(setter(channel, value))
         except Exception as exc:
             module.fail_json(msg=f"Failed to set {label}: {exc}")
+
+
+def _apply_push(module, host, channel, value, check_mode, changes):
+    """Switch push notifications for the channel, or device-wide on cameras
+    that only have a device-wide switch. Read back after setting."""
+    if value is None:
+        return
+    if host.supported(channel, "push"):
+        target = channel
+    elif host.supported(None, "push"):
+        target = None
+    else:
+        module.fail_json(msg="push_notifications is not supported by this camera")
+    try:
+        if push_enabled(host, channel) == value:
+            return
+    except Exception as exc:
+        module.fail_json(msg=f"Could not read push_notifications: {exc}")
+
+    changes.append("push_notifications")
+    if check_mode:
+        return
+
+    try:
+        run_async(host.set_push(target, value))
+        taken = push_enabled(host, channel)
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set push_notifications: {exc}")
+    if taken != value:
+        module.fail_json(msg=f"push_notifications: the camera still reports {taken}")
+
+
+# Host-level settings that are a single "enable" flag reolink-aio has no
+# setter for. Option name -> the API's block name, which also names the
+# commands: Get<block> and Set<block>.
+_HOST_SWITCHES = {
+    "auto_upgrade": "AutoUpgrade",
+    "upnp": "Upnp",
+    "ddns": "Ddns",
+}
+
+
+def _apply_host_switch(module, host, option, value, check_mode, changes):
+    """Set one of _HOST_SWITCHES with a raw Set, then read it back.
+
+    The block is sent back whole with only "enable" changed, so the rest of
+    it (a DDNS provider's settings, say) is kept.
+    """
+    if value is None:
+        return
+    block = _HOST_SWITCHES[option]
+    try:
+        current = get_switch(host, block)
+    except Exception as exc:
+        module.fail_json(msg=f"Could not read {option} (Get{block}): {exc}")
+    if bool(current["enable"]) == value:
+        return
+
+    changes.append(option)
+    if check_mode:
+        return
+
+    current["enable"] = 1 if value else 0
+    try:
+        run_async(host.send_setting([{"cmd": f"Set{block}", "action": 0, "param": {block: current}}]))
+        taken = bool(get_switch(host, block)["enable"])
+    except Exception as exc:
+        module.fail_json(msg=f"Failed to set {option} (Set{block}): {exc}")
+    if taken != value:
+        module.fail_json(msg=f"{option}: Set{block} was accepted but the camera still reports enable={int(taken)}")
 
 
 def _apply_p2p(module, host, value, check_mode, changes):
@@ -604,10 +864,25 @@ def main():
         interval=dict(type="int"),
         sync_now=dict(type="bool", default=False),
     )
+    dst_transition_spec = dict(
+        month=dict(type="int"),
+        week=dict(type="int"),
+        weekday=dict(type="int"),
+        hour=dict(type="int"),
+        minute=dict(type="int"),
+        second=dict(type="int"),
+    )
+    dst_spec = dict(
+        enabled=dict(type="bool"),
+        offset=dict(type="int"),
+        start=dict(type="dict", options=dst_transition_spec),
+        end=dict(type="dict", options=dst_transition_spec),
+    )
     time_spec = dict(
-        date_format=dict(type="str"),
+        date_format=dict(type="str", choices=["DD/MM/YYYY", "MM/DD/YYYY", "YYYY/MM/DD"]),
         hours_24=dict(type="bool"),
         timezone_offset=dict(type="int"),
+        dst=dict(type="dict", options=dst_spec),
     )
     video_spec = dict(
         stream=dict(type="str", default="main", choices=["main", "sub", "ext"]),
@@ -662,6 +937,9 @@ def main():
             email_notifications=dict(type="bool"),
             ftp_upload=dict(type="bool"),
             p2p_enabled=dict(type="bool"),
+            auto_upgrade=dict(type="bool"),
+            upnp=dict(type="bool"),
+            ddns=dict(type="bool"),
         ),
         supports_check_mode=True,
     )
@@ -680,8 +958,10 @@ def main():
         except Exception as exc:
             module.warn(f"Could not retrieve current camera states: {exc}")
 
-        _apply_ntp(module, host, module.params.get("ntp"), check_mode, changes)
+        # Time zone and DST before NTP, so that ntp.sync_now sets the clock
+        # in the new zone.
         _apply_time(module, host, module.params.get("time"), check_mode, changes)
+        _apply_ntp(module, host, module.params.get("ntp"), check_mode, changes)
         _apply_video(module, host, channel, module.params.get("video"), check_mode, changes)
         _apply_image(module, host, channel, module.params.get("image"), check_mode, changes)
         _apply_osd(module, host, channel, module.params.get("osd"), check_mode, changes)
@@ -691,9 +971,11 @@ def main():
         _apply_bool_setting(module, host, channel, module.params.get("audio"), "set_audio", "audio", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("motion_detection"), "set_motion_detection", "motion_detection", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("spotlight"), "set_spotlight", "spotlight", check_mode, changes)
-        _apply_bool_setting(module, host, channel, module.params.get("push_notifications"), "set_push", "push_notifications", check_mode, changes)
+        _apply_push(module, host, channel, module.params.get("push_notifications"), check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("email_notifications"), "set_email", "email_notifications", check_mode, changes)
         _apply_bool_setting(module, host, channel, module.params.get("ftp_upload"), "set_ftp", "ftp_upload", check_mode, changes)
+        for option in _HOST_SWITCHES:
+            _apply_host_switch(module, host, option, module.params.get(option), check_mode, changes)
 
         if module.params.get("daynight") is not None:
             changes.append("daynight")

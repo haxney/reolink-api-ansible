@@ -116,3 +116,30 @@ def disconnect(module, host):
         run_async(host.logout())
     except Exception:
         pass
+
+
+# The Reolink app and web UI call these Flip and Mirror; the ISP block that
+# GetIsp returns and SetIsp takes calls them rotation and mirroring.
+ISP_ORIENTATION_KEYS = {"flip": "rotation", "mirror": "mirroring"}
+
+
+def get_switch(host, block):
+    """Read a host-level setting reolink-aio has no getter for, by Get<block>."""
+    data = run_async(host.send([{"cmd": f"Get{block}", "action": 0, "param": {}}], expected_response_type="json"))
+    return data[0]["value"][block]
+
+
+def push_enabled(host, channel):
+    """Whether push notifications are on for a channel, read fresh.
+
+    GetPush/GetPushV20 come in three shapes, and reolink-aio's push_enabled()
+    only answers for the per-channel ones. The RLC-810A, RLC-822A and P330
+    have a single device-wide switch, for which supported(0, "push") is false.
+    """
+    run_async(host.get_state(cmd="GetPush", ch=channel))
+    settings = host._push_settings[channel]
+    if "scheduleEnable" in settings:  # per-channel switch (V20)
+        return settings["scheduleEnable"] == 1
+    if "enable" in settings:  # device-wide switch (V20)
+        return settings["enable"] == 1
+    return settings["schedule"]["enable"] == 1  # per-channel switch (legacy)

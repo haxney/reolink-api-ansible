@@ -104,6 +104,65 @@ facts:
     onvif_port:
       description: ONVIF port.
       type: int
+    outbound:
+      description:
+        - Switches for the device's connections to outside servers, each true
+          if on, or null if it could not be read. Push is per channel, under
+          C(channels).
+      type: dict
+      version_added: "0.3.0"
+      contains:
+        p2p:
+          description: P2P relay through Reolink's servers.
+          type: bool
+        auto_upgrade:
+          description: Automatic firmware upgrades from Reolink's servers.
+          type: bool
+        upnp:
+          description: UPnP port mapping on the router.
+          type: bool
+        ddns:
+          description: Dynamic DNS registration.
+          type: bool
+    net_port:
+      description: Whether each network service is enabled, or null if unknown.
+      type: dict
+      version_added: "0.3.0"
+      contains:
+        rtsp:
+          description: RTSP server.
+          type: bool
+        onvif:
+          description: ONVIF server.
+          type: bool
+        rtmp:
+          description: RTMP server.
+          type: bool
+    time:
+      description: The device clock and its time-zone settings. Null if they could not be read.
+      type: dict
+      version_added: "0.3.0"
+      contains:
+        local_time:
+          description: The wall-clock time the device shows, as C(YYYY-MM-DDTHH:MM:SS).
+          type: str
+        utc_offset:
+          description:
+            - The offset from UTC the device is applying now, DST included, in
+              seconds EAST of UTC (e.g. C(-14400) for UTC-4).
+            - Note the sign is the reverse of C(timezone_offset).
+          type: int
+        clock_error:
+          description:
+            - Seconds the device clock is ahead of the clock of the host running
+              the module (negative if behind), compared in UTC.
+          type: int
+        timezone_offset:
+          description: Configured standard-time offset, in Reolink's convention of seconds WEST of UTC.
+          type: int
+        dst:
+          description: Configured DST rule, in the shape of reolink_camera's C(time.dst) option.
+          type: dict
     channels:
       description: Per-channel information.
       type: list
@@ -130,10 +189,24 @@ facts:
         audio:
           description: Audio recording enabled.
           type: bool
+        flip:
+          description: Image flipped vertically (ISP C(rotation)). Null if the camera has no such setting.
+          type: bool
+          version_added: "0.3.0"
+        mirror:
+          description: Image mirrored horizontally (ISP C(mirroring)). Null if the camera has no such setting.
+          type: bool
+          version_added: "0.3.0"
+        push_notifications:
+          description: Push notifications through Reolink's servers. Null if unknown.
+          type: bool
+          version_added: "0.3.0"
         stream_sources:
           description: Available stream URLs (RTSP).
           type: dict
 """
+
+from datetime import datetime, timezone
 
 from ansible.module_utils.basic import AnsibleModule
 
@@ -144,6 +217,9 @@ try:
         disconnect,
         run_async,
         HAS_REOLINK,
+        ISP_ORIENTATION_KEYS,
+        get_switch,
+        push_enabled,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -152,6 +228,9 @@ except ImportError:
         disconnect,
         run_async,
         HAS_REOLINK,
+        ISP_ORIENTATION_KEYS,
+        get_switch,
+        push_enabled,
     )
 
 
@@ -160,6 +239,56 @@ def _safe_get(fn, *args, default=None):
         return fn(*args)
     except Exception:
         return default
+
+
+# Option name -> Reolink Dst key suffix, as in reolink_camera's time.dst.
+_DST_TRANSITION_SUFFIXES = {
+    "month": "Mon",
+    "week": "Week",
+    "weekday": "Weekday",
+    "hour": "Hour",
+    "minute": "Min",
+    "second": "Sec",
+}
+
+
+# Host-level switches read with a raw Get<block>, as reolink_camera sets them.
+# Fact name -> the API's block name.
+_OUTBOUND_SWITCHES = {
+    "p2p": "P2p",
+    "auto_upgrade": "AutoUpgrade",
+    "upnp": "Upnp",
+    "ddns": "Ddns",
+}
+
+
+def _orientation(host, ch):
+    """flip and mirror for one channel, None where the camera lacks them."""
+    run_async(host.get_state(cmd="GetIsp", ch=ch))
+    isp = host._isp_settings.get(ch) or {}
+    return {name: bool(isp[key]) if key in isp else None for name, key in ISP_ORIENTATION_KEYS.items()}
+
+
+def _clock(host):
+    """The device clock and time-zone settings; see RETURN for the fields."""
+    camera_now = run_async(host.async_get_time())
+    host_now = datetime.now(timezone.utc)
+    settings = host._time_settings
+    dst = settings.get("Dst")
+    if dst is not None:
+        dst = {
+            "enabled": bool(dst.get("enable")),
+            "offset": dst.get("offset"),
+            "start": {name: dst.get("start" + suffix) for name, suffix in _DST_TRANSITION_SUFFIXES.items()},
+            "end": {name: dst.get("end" + suffix) for name, suffix in _DST_TRANSITION_SUFFIXES.items()},
+        }
+    return {
+        "local_time": camera_now.replace(tzinfo=None).isoformat(),
+        "utc_offset": int(camera_now.utcoffset().total_seconds()),
+        "clock_error": round((camera_now - host_now).total_seconds()),
+        "timezone_offset": settings["Time"]["timeZone"],
+        "dst": dst,
+    }
 
 
 def main():
@@ -191,6 +320,7 @@ def main():
                 src = _safe_get(lambda ch=ch, stream=stream: run_async(host.get_rtsp_stream_source(ch, stream)), default=None)
                 if src:
                     stream_sources[stream] = src
+            orientation = _safe_get(_orientation, host, ch, default={"flip": None, "mirror": None})
 
             channels.append({
                 "channel": ch,
@@ -199,6 +329,9 @@ def main():
                 "ir_lights": _safe_get(host.ir_enabled, ch, default=None),
                 "recording": _safe_get(host.recording_enabled, ch, default=None) if hasattr(host, "recording_enabled") else None,
                 "audio": _safe_get(host.audio_record, ch, default=None),
+                "flip": orientation["flip"],
+                "mirror": orientation["mirror"],
+                "push_notifications": _safe_get(push_enabled, host, ch, default=None),
                 "stream_sources": stream_sources,
             })
 
@@ -214,6 +347,13 @@ def main():
             "rtmp_port": _safe_get(lambda: host.rtmp_port, default=None),
             "rtsp_port": _safe_get(lambda: host.rtsp_port, default=None),
             "onvif_port": _safe_get(lambda: host.onvif_port, default=None),
+            "outbound": {name: _safe_get(lambda block=block: bool(get_switch(host, block)["enable"]), default=None) for name, block in _OUTBOUND_SWITCHES.items()},
+            "net_port": {
+                "rtsp": _safe_get(lambda: host.rtsp_enabled, default=None),
+                "onvif": _safe_get(lambda: host.onvif_enabled, default=None),
+                "rtmp": _safe_get(lambda: host.rtmp_enabled, default=None),
+            },
+            "time": _safe_get(_clock, host, default=None),
             "channels": channels,
         }
 
