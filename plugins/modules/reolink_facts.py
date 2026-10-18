@@ -48,9 +48,9 @@ options:
       - Also ask Reolink's download site whether newer firmware exists, and
         report it under C(firmware).
       - The request goes from the host running the module to reolink.com, not
-        from the camera, so it works for cameras with no internet access.
-        reolink-aio does not verify reolink.com's TLS certificate, so treat the
-        answer as a prompt to look, and take firmware from reolink.com itself.
+        from the camera, so it works for cameras with no internet access. It
+        verifies reolink.com's TLS certificate, which reolink-aio on its own
+        does not.
     type: bool
     default: false
     version_added: "0.4.0"
@@ -296,6 +296,7 @@ try:
         push_enabled,
         switch_target,
         stream_encoding,
+        verify_reolink_com,
     )
 except ImportError:
     from ..module_utils.reolink_utils import (  # type: ignore[no-redef]
@@ -309,6 +310,7 @@ except ImportError:
         push_enabled,
         switch_target,
         stream_encoding,
+        verify_reolink_com,
     )
 
 
@@ -358,9 +360,14 @@ def _firmware(host):
 
     reolink-aio's public check_new_firmware() also sends CheckFirmware to the
     camera, which makes the camera contact Reolink; the private
-    _check_reolink_firmware() is the reolink.com half alone.
+    _check_reolink_firmware() is the reolink.com half alone. Its requests go
+    over a certificate-verifying session (verify_reolink_com).
     """
-    latest = run_async(host._check_reolink_firmware(None))
+    close = verify_reolink_com(host)
+    try:
+        latest = run_async(host._check_reolink_firmware(None))
+    finally:
+        run_async(close())
     return {
         "current": str(host.sw_version),
         "latest": latest.version_string,

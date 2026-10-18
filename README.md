@@ -16,6 +16,7 @@ Built on top of the officially-authorized
 | [`reolink_camera`](docs/reolink_camera.md) | Configure camera settings (NTP, video, image, recording, IR, etc.) |
 | [`reolink_user`](docs/reolink_user.md) | Manage user accounts and change passwords |
 | [`reolink_facts`](docs/reolink_facts.md) | Gather device facts and current settings |
+| `reolink_firmware` | Install the newest firmware Reolink offers, by upload |
 
 ---
 
@@ -292,7 +293,29 @@ check that settings took:
 With `check_firmware: true` it also asks reolink.com for the newest firmware
 for the camera's model and hardware version, and reports it under `firmware`
 (`current`, `latest`, `update_available`, `download_url`, `release_notes`). The
-request comes from the host running the module, not the camera.
+request comes from the host running the module, not the camera, and verifies
+reolink.com's TLS certificate.
+
+---
+
+### `reolink_firmware`
+
+Installs the newest firmware reolink.com offers for the camera's model and
+hardware version, if it is newer than the running one, and returns once the
+camera reports the new version. No extra parameters beyond the connection
+options.
+
+- The host running the module downloads the package and uploads it; the
+  camera never contacts Reolink (reolink-aio's `update_firmware()` would ask it
+  to fetch the update itself first).
+- Requests to reolink.com verify TLS certificates, the package must come from
+  a reolink.com or reolink.us host, and the uploaded bytes are the ones hashed
+  in the returned `package.sha256`.
+- Never installs older firmware.
+- Check mode downloads and unpacks the package but sends nothing to the
+  camera.
+- Installing reboots the camera (about a minute without video) and can reset
+  settings, so re-apply its configuration afterwards.
 
 ---
 

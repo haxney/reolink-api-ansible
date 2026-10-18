@@ -129,6 +129,31 @@ def _make_reolink_stub():
 _make_reolink_stub()
 
 
+def _make_aiohttp_stub():
+    """Just enough aiohttp for verify_reolink_com(): sessions that record
+    their SSL setting and whether they were closed."""
+    mod = types.ModuleType("aiohttp")
+
+    class TCPConnector:
+        def __init__(self, ssl=None):
+            self.ssl = ssl
+
+    class ClientSession:
+        def __init__(self, connector=None):
+            self.connector = connector
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    mod.TCPConnector = TCPConnector
+    mod.ClientSession = ClientSession
+    sys.modules.setdefault("aiohttp", mod)
+
+
+_make_aiohttp_stub()
+
+
 # ---------------------------------------------------------------------------
 # Now import the modules under test
 # ---------------------------------------------------------------------------
@@ -143,6 +168,7 @@ sys.path.insert(0, _COLLECTION_ROOT)
 from plugins.module_utils import reolink_utils  # noqa: E402
 from plugins.modules import reolink_camera  # noqa: E402
 from plugins.modules import reolink_facts  # noqa: E402
+from plugins.modules import reolink_firmware  # noqa: E402
 
 
 class _FailJson(Exception):
@@ -815,6 +841,42 @@ class TestPush(unittest.TestCase):
             reolink_camera._apply_push(module, host, 0, False, check_mode=False, changes=[])
 
 
+class TestVerifyReolinkCom(unittest.TestCase):
+    def _make_host(self):
+        host = MagicMock()
+        camera_session = object()
+        host._aiohttp_session = camera_session
+        host.seen_sessions = []
+
+        async def send_reolink_com(URL, expected_response_type="application/json", user_agent="reolink_aio"):
+            host.seen_sessions.append(host._aiohttp_session)
+            return {"url": URL}
+
+        host.send_reolink_com = send_reolink_com
+        return host, camera_session
+
+    def test_reolink_com_uses_a_verifying_session_and_restores_the_camera_one(self):
+        import ssl
+        host, camera_session = self._make_host()
+        close = reolink_utils.verify_reolink_com(host)
+        reolink_utils.run_async(host.send_reolink_com("https://reolink.com/x"))
+        used = host.seen_sessions[0]
+        self.assertIsNot(used, camera_session)
+        self.assertEqual(used.connector.ssl.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(used.connector.ssl.check_hostname)
+        self.assertIs(host._aiohttp_session, camera_session)
+        reolink_utils.run_async(close())
+        self.assertTrue(used.closed)
+
+    def test_downloads_served_from_memory(self):
+        host, _ = self._make_host()
+        reolink_utils.verify_reolink_com(host, downloads={"https://cdn/fw.zip": b"PK..."})
+        response = reolink_utils.run_async(
+            host.send_reolink_com("https://cdn/fw.zip", expected_response_type="application/octet-stream"))
+        self.assertEqual(reolink_utils.run_async(response.read()), b"PK...")
+        self.assertEqual(host.seen_sessions, [])
+
+
 class TestFacts(unittest.TestCase):
     def test_switch_state_device_wide(self):
         host = MagicMock()
@@ -894,6 +956,106 @@ class TestFacts(unittest.TestCase):
         self.assertIs(clock["hours_24"], False)
         self.assertTrue(clock["dst"]["enabled"])
         self.assertEqual(clock["dst"]["end"], {"month": 10, "week": 5, "weekday": 0, "hour": 2, "minute": 0, "second": 0})
+
+
+class _Version:
+    """Comparable like reolink-aio's SoftwareVersion."""
+
+    def __init__(self, n, url=None):
+        self.n = n
+        self.version_string = f"v3.1.0.{n}"
+        self.download_url = url
+
+    def __gt__(self, other):
+        return self.n > other.n
+
+    def __ge__(self, other):
+        return self.n >= other.n
+
+
+def _zip(*names):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"firmware")
+    return buf.getvalue()
+
+
+class TestFirmware(unittest.TestCase):
+    URL = "https://home-cdn.reolink.us/wp-content/uploads/fw.zip"
+
+    def _make_host(self, running, latest, package=None):
+        host = MagicMock()
+        host.state = {"running": _Version(running)}
+        type(host).sw_version_object = property(lambda h: h.state["running"])
+        type(host).sw_version = property(lambda h: h.state["running"].version_string)
+        host._check_reolink_firmware = AsyncMock(return_value=latest)
+        host._latest_sw_version = {}
+        host.downloaded = []
+        host.uploaded = None
+
+        async def send_reolink_com(URL, expected_response_type="application/json", user_agent="reolink_aio"):
+            host.downloaded.append(URL)
+            response = MagicMock()
+            response.read = AsyncMock(return_value=package)
+            return response
+
+        async def upload_firmware(channel, new_version):
+            host.uploaded = (channel, new_version)
+            host.state["running"] = new_version
+
+        host.send_reolink_com = send_reolink_com
+        host.upload_firmware = upload_firmware
+        return host
+
+    def _module(self, check_mode=False):
+        module = _failing_module()
+        module.check_mode = check_mode
+        return module
+
+    def test_nothing_newer(self):
+        host = self._make_host(5764, _Version(5764, self.URL))
+        result = reolink_firmware._ensure_latest(self._module(), host, {})
+        self.assertFalse(result["changed"])
+        self.assertEqual(host.downloaded, [])
+
+    def test_check_mode_downloads_but_does_not_upload(self):
+        host = self._make_host(4569, _Version(5764, self.URL), _zip("IPC_523128M8MP.5764_2512171966.pak"))
+        result = reolink_firmware._ensure_latest(self._module(check_mode=True), host, {})
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["package"]["file"], "IPC_523128M8MP.5764_2512171966.pak")
+        self.assertEqual(len(result["package"]["sha256"]), 64)
+        self.assertIsNone(host.uploaded)
+        self.assertEqual(result["version"], "v3.1.0.4569")
+
+    def test_installs_and_reads_back(self):
+        latest = _Version(5764, self.URL)
+        package = _zip("fw.pak")
+        host = self._make_host(4569, latest, package)
+        downloads = {}
+        result = reolink_firmware._ensure_latest(self._module(), host, downloads)
+        self.assertTrue(result["changed"])
+        self.assertEqual(host.uploaded, (None, latest))
+        self.assertIs(host._latest_sw_version[None], latest)
+        # What upload_firmware() downloads is served from this, so it is the
+        # same bytes that were hashed.
+        self.assertEqual(downloads[self.URL], package)
+        self.assertEqual(result["version"], "v3.1.0.5764")
+
+    def test_refuses_a_non_reolink_url(self):
+        host = self._make_host(4569, _Version(5764, "https://evil.example/fw.zip"), _zip("fw.pak"))
+        module = self._module()
+        with self.assertRaises(_FailJson):
+            reolink_firmware._ensure_latest(module, host, {})
+        self.assertIn("Refusing firmware", module.fail_json.call_args.kwargs["msg"])
+        self.assertEqual(host.downloaded, [])
+
+    def test_refuses_a_package_without_firmware(self):
+        host = self._make_host(4569, _Version(5764, self.URL), _zip("README.txt"))
+        with self.assertRaises(_FailJson):
+            reolink_firmware._ensure_latest(self._module(), host, {})
 
 
 if __name__ == "__main__":

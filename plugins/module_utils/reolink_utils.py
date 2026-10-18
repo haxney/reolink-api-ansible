@@ -12,6 +12,7 @@ description:
 """
 
 import asyncio
+import ssl
 import types
 import traceback
 import xml.etree.ElementTree as ET
@@ -215,3 +216,54 @@ def stream_encoding(host, channel, stream):
         return vtype
     root = ET.fromstring(run_async(host.baichuan.send(cmd_id=56, channel=channel)))
     return {"0": "h264", "1": "h265"}[root.find(f".//{stream}Stream/videoEncType").text]
+
+
+class _Downloaded:
+    """Stands in for the aiohttp response that upload_firmware() reads."""
+
+    def __init__(self, data):
+        self._data = data
+
+    async def read(self):
+        return self._data
+
+    def release(self):
+        pass
+
+
+def verify_reolink_com(host, downloads=None):
+    """Send host's requests to reolink.com over a certificate-verifying session.
+
+    reolink-aio sends them on the session it uses for the cameras, which
+    accepts any certificate (theirs are self-signed), so a firmware lookup or
+    download could be answered by anyone on the path. Downloads already in
+    `downloads` (url -> bytes) are served from it, so the bytes a module
+    inspected are the bytes reolink-aio uploads.
+
+    Returns a coroutine function that closes the verifying session.
+    """
+    import aiohttp  # reolink-aio's own dependency, needed only here
+
+    original = host.send_reolink_com
+    session = None
+
+    async def send_reolink_com(URL, expected_response_type="application/json", user_agent="reolink_aio"):
+        nonlocal session
+        if downloads is not None and expected_response_type == "application/octet-stream" and URL in downloads:
+            return _Downloaded(downloads[URL])
+        if session is None:
+            session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl.create_default_context()))
+        camera_session = host._aiohttp_session
+        host._aiohttp_session = session
+        try:
+            return await original(URL, expected_response_type, user_agent)
+        finally:
+            host._aiohttp_session = camera_session
+
+    host.send_reolink_com = send_reolink_com
+
+    async def close():
+        if session is not None:
+            await session.close()
+
+    return close
